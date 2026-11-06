@@ -22,6 +22,24 @@ const LANDMARKS: { re: RegExp; city: string; english: string; landmark: string }
   { re: /洱海|崇圣寺/, city: "大理", english: "Dali", landmark: "洱海" },
   { re: /夫子庙|中山陵|玄武湖/, city: "南京", english: "Nanjing", landmark: "夫子庙" },
   { re: /鼓浪屿|曾厝垵/, city: "厦门", english: "Xiamen", landmark: "鼓浪屿" },
+  { re: /泰山|岱庙/, city: "泰安", english: "Tai'an", landmark: "泰山" },
+  { re: /黄山/, city: "黄山", english: "Huangshan", landmark: "黄山" },
+  { re: /峨眉山|乐山大佛/, city: "乐山", english: "Leshan", landmark: "峨眉山" },
+  { re: /华山/, city: "渭南", english: "Weinan", landmark: "华山" },
+  { re: /九寨沟/, city: "阿坝", english: "Aba", landmark: "九寨沟" },
+  { re: /漓江|阳朔/, city: "桂林", english: "Guilin", landmark: "漓江" },
+  { re: /张家界|武陵源/, city: "张家界", english: "Zhangjiajie", landmark: "张家界" },
+  { re: /瘦西湖/, city: "扬州", english: "Yangzhou", landmark: "瘦西湖" },
+  { re: /黄鹤楼/, city: "武汉", english: "Wuhan", landmark: "黄鹤楼" },
+  { re: /洪崖洞|磁器口|解放碑/, city: "重庆", english: "Chongqing", landmark: "洪崖洞" },
+  { re: /长城|八达岭/, city: "北京", english: "Beijing", landmark: "长城" },
+  { re: /乌镇|西塘/, city: "嘉兴", english: "Jiaxing", landmark: "乌镇" },
+  { re: /都江堰|青城山/, city: "成都", english: "Chengdu", landmark: "都江堰" },
+  { re: /莫高窟/, city: "敦煌", english: "Dunhuang", landmark: "莫高窟" },
+  { re: /布达拉宫/, city: "拉萨", english: "Lhasa", landmark: "布达拉宫" },
+  { re: /亚龙湾|天涯海角/, city: "三亚", english: "Sanya", landmark: "亚龙湾" },
+  { re: /庐山/, city: "九江", english: "Jiujiang", landmark: "庐山" },
+  { re: /普陀山/, city: "舟山", english: "Zhoushan", landmark: "普陀山" },
 ];
 
 export const KNOWN_CITIES: KnownCity[] = [
@@ -43,6 +61,14 @@ export const KNOWN_CITIES: KnownCity[] = [
   { name: "厦门", english: "Xiamen" },
   { name: "济南", english: "Jinan" },
   { name: "武汉", english: "Wuhan" },
+  { name: "泰安", english: "Tai'an" },
+  { name: "重庆", english: "Chongqing" },
+  { name: "桂林", english: "Guilin" },
+  { name: "黄山", english: "Huangshan" },
+  { name: "三亚", english: "Sanya" },
+  { name: "扬州", english: "Yangzhou" },
+  { name: "乐山", english: "Leshan" },
+  { name: "张家界", english: "Zhangjiajie" },
 ];
 
 export function citiesInText(text: string): PlaceHit[] {

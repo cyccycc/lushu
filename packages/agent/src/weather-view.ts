@@ -1,4 +1,5 @@
 import type { WeatherReport } from "@lushu/tools";
+import { addDays } from "./roadbook/time";
 import type { DayWeather, ItineraryDay, PlanVariant } from "./types";
 
 function unavailable(city: string, note: string): DayWeather {
@@ -14,7 +15,12 @@ function unavailable(city: string, note: string): DayWeather {
   };
 }
 
-export function weatherForDay(city: string, dayIndex: number, reports: WeatherReport[]): DayWeather {
+export function weatherForDay(
+  city: string,
+  dayIndex: number,
+  reports: WeatherReport[],
+  startDate?: string | null,
+): DayWeather {
   const report =
     reports.find((item) => item.query === city || Boolean(item.resolvedName?.includes(city))) ??
     reports.find((item) => city.includes(item.query));
@@ -22,7 +28,8 @@ export function weatherForDay(city: string, dayIndex: number, reports: WeatherRe
   if (report.stub || report.days.length === 0) {
     return unavailable(city, report.note || "天气接口没有返回预报。");
   }
-  const day = report.days[dayIndex];
+  const wanted = startDate ? addDays(startDate, dayIndex) : null;
+  const day = wanted ? report.days.find((item) => item.date === wanted) : report.days[dayIndex];
   if (!day) return unavailable(city, "预报天数盖不住这一天，出发前请再查。");
   return {
     city,
@@ -36,12 +43,16 @@ export function weatherForDay(city: string, dayIndex: number, reports: WeatherRe
   };
 }
 
-export function attachWeather(variants: PlanVariant[], reports: WeatherReport[]): PlanVariant[] {
+export function attachWeather(
+  variants: PlanVariant[],
+  reports: WeatherReport[],
+  startDate?: string | null,
+): PlanVariant[] {
   return variants.map((variant) => ({
     ...variant,
     days: variant.days.map((day) => ({
       ...day,
-      weather: weatherForDay(day.city, Math.max(0, day.day - 1), reports),
+      weather: weatherForDay(day.city, Math.max(0, day.day - 1), reports, startDate),
     })),
   }));
 }

@@ -1,13 +1,18 @@
 import { currentUser } from "@/lib/auth";
+import { denyIfClosed } from "@/lib/gate";
 import { createSession, listSessions } from "@/lib/store";
 
 export async function GET() {
+  const denied = await denyIfClosed();
+  if (denied) return denied;
   const sessions = await listSessions();
   const user = await currentUser();
   return Response.json({ sessions, email: user?.email ?? null });
 }
 
 export async function POST(request: Request) {
+  const denied = await denyIfClosed();
+  if (denied) return denied;
   const body = (await request.json().catch(() => null)) as { brief?: unknown } | null;
   const brief = typeof body?.brief === "string" ? body.brief.trim() : "";
   if (brief.length < 2) {

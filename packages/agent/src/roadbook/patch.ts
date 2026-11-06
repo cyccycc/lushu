@@ -16,7 +16,7 @@ import {
   type VerifyItem,
 } from "./types";
 
-const MAX_OPS = 40;
+const MAX_OPS = 160;
 
 function cloneItem(item: RoadbookItem): RoadbookItem {
   return {
@@ -152,8 +152,17 @@ export function normalizeItem(value: unknown, fallbackId?: string): RoadbookItem
   };
 }
 
+function lockedUpdateError(item: RoadbookItem, fields: ItemFields): string | null {
+  if (!item.locked) return null;
+  for (const key of Object.keys(fields) as (keyof ItemFields)[]) {
+    if (fields[key] === undefined) continue;
+    if (key === "status" || key === "locked") continue;
+    return `「${item.title}」已锁定，不能改。`;
+  }
+  return null;
+}
+
 function applyFields(item: RoadbookItem, fields: ItemFields): string | null {
-  if (fields.locked === false) return "不能用补丁解除锁定。";
   if (fields.dayIndex != null) {
     if (!Number.isInteger(fields.dayIndex) || fields.dayIndex < 1 || fields.dayIndex > 14) return "日序无效。";
     item.dayIndex = fields.dayIndex;
@@ -299,7 +308,8 @@ function applyOps(items: RoadbookItem[], ops: PatchOp[], touched: Set<string>): 
     if (op.op === "update") {
       const item = items.find((current) => current.id === op.id);
       if (!item) return "要修改的项不存在。";
-      if (item.locked) return `「${item.title}」已锁定，不能改。`;
+      const blocked = lockedUpdateError(item, op.fields);
+      if (blocked) return blocked;
       const error = applyFields(item, op.fields);
       if (error) return error;
       touched.add(item.id);
@@ -464,7 +474,7 @@ export function applyPatch(book: Roadbook, request: PatchRequest, now = new Date
   const verifyChecklist: VerifyItem[] = book.verifyChecklist.map((item) => ({ ...item }));
   for (const text of request.verifyAdds ?? []) {
     const clean = text.trim().slice(0, 200);
-    if (!clean) continue;
+    if (!clean || verifyChecklist.some((item) => item.text === clean)) continue;
     verifyChecklist.push({ id: `v_${patchId}_${verifyChecklist.length}`, text: clean });
   }
 

@@ -47,6 +47,50 @@ export function daysBetween(startIso: string, endIso: string): number {
   return Math.round((end - start) / 86_400_000);
 }
 
+export function shanghaiMinutes(now: Date): number {
+  const text = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(now);
+  const match = /(\d{1,2}):(\d{2})/.exec(text);
+  if (!match?.[1] || !match[2]) return 0;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  return (hour === 24 ? 0 : hour) * 60 + minute;
+}
+
+const WEEKDAY_INDEX: Record<string, number> = { 日: 0, 天: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6 };
+
+export function inferWeekdayDate(label: string, now: Date): string | null {
+  const week = label.match(/周([一二三四五六日天])/);
+  if (!week?.[1]) {
+    if (label.includes("周末")) return inferStartDate(label, now);
+    return null;
+  }
+  const target = WEEKDAY_INDEX[week[1]];
+  if (target == null) return null;
+  const today = shanghaiDate(now);
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    weekday: "short",
+  }).format(now);
+  const index: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const day = index[weekday] ?? 0;
+  return addDays(today, (target - day + 7) % 7);
+}
+
+/** Forecast length that reaches the last trip day, counting from today. */
+export function forecastDaysThrough(startDate: string, tripDays: number, now = new Date()): number {
+  const today = shanghaiDate(now);
+  const safeDays = Math.max(1, Math.round(tripDays) || 1);
+  const end = addDays(startDate, safeDays - 1);
+  const span = daysBetween(today, end);
+  if (!Number.isFinite(span) || span < 0) return 1;
+  return Math.min(16, span + 1);
+}
+
 export function inferStartDate(whenLabel: string | null, now: Date): string {
   const today = shanghaiDate(now);
   if (!whenLabel || !whenLabel.includes("周末")) return today;

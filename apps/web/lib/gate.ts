@@ -68,6 +68,13 @@ export function keyMatches(provided: string, expected: string): boolean {
   return safeEqual(provided, expected);
 }
 
+/** Same password gate as roadbook routes. Open when no password is configured. */
+export async function denyIfClosed(): Promise<Response | null> {
+  if (!passwordConfigured()) return null;
+  if (await gateOpen()) return null;
+  return Response.json({ error: "先输入访问密码。" }, { status: 401 });
+}
+
 export async function canReadBook(request: Request, accessKey: string): Promise<boolean> {
   if (keyMatches(bookKeyFrom(request), accessKey)) return true;
   return gateOpen();

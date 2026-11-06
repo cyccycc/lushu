@@ -1,7 +1,10 @@
 import { applyClarification, assessClarification } from "@lushu/agent";
+import { denyIfClosed } from "@/lib/gate";
 import { enqueueSave, isActive, isSessionId, readSession } from "@/lib/store";
 
 export async function POST(request: Request, ctx: { params: Promise<{ id: string }> }) {
+  const denied = await denyIfClosed();
+  if (denied) return denied;
   const { id } = await ctx.params;
   if (!isSessionId(id)) {
     return Response.json({ error: "找不到这趟行程。" }, { status: 404 });

@@ -1,3 +1,4 @@
+import { blockedModelUrlMessage, isBlockedLlmHost, modelHttpError } from "./base";
 import { estimateCostUsd, type TokenUsage } from "./cost";
 import { readLlmEnv, type LlmEnv } from "./env";
 
@@ -39,6 +40,18 @@ type ChatBody = {
 function chatUrl(baseURL: string): string {
   if (baseURL.endsWith("/chat/completions")) return baseURL;
   return `${baseURL}/chat/completions`;
+}
+
+function assertAllowedModelUrl(baseURL: string): void {
+  let url: URL;
+  try {
+    url = new URL(baseURL);
+  } catch {
+    throw new LlmError(blockedModelUrlMessage, { code: "http" });
+  }
+  if (url.protocol !== "https:" || url.username || url.password || isBlockedLlmHost(url.hostname)) {
+    throw new LlmError(blockedModelUrlMessage, { code: "http" });
+  }
 }
 
 function redact(text: string, secret: string | null): string {
@@ -91,6 +104,7 @@ async function postChat(
   const onAbort = () => controller.abort();
   signal?.addEventListener("abort", onAbort);
   try {
+    assertAllowedModelUrl(env.baseURL);
     const response = await fetch(chatUrl(env.baseURL), {
       method: "POST",
       signal: controller.signal,
@@ -101,14 +115,14 @@ async function postChat(
       },
       body: JSON.stringify(body),
     });
-    const raw = await response.text();
     if (!response.ok) {
-      const snippet = redact(raw.slice(0, 400), env.apiKey);
-      throw new LlmError(`模型接口返回 ${response.status}：${snippet || "空响应"}`, {
+      await response.body?.cancel().catch(() => undefined);
+      throw new LlmError(modelHttpError(response.status), {
         status: response.status,
         code: "http",
       });
     }
+    const raw = await response.text();
     let data: unknown;
     try {
       data = JSON.parse(raw);

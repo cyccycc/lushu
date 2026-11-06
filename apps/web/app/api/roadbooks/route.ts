@@ -1,4 +1,4 @@
-import { buildDraft, normalizeWeatherQuery, replaceWeather, snapsFromReport } from "@lushu/agent/roadbook";
+import { buildDraft, forecastDaysThrough, normalizeWeatherQuery, replaceWeather, snapsFromReport } from "@lushu/agent/roadbook";
 import { getWeather, webSearch } from "@lushu/tools";
 import { gateOpen, passwordConfigured } from "@/lib/gate";
 import { createAccessKey, createRoadbookId, enqueueRoadbook, listRoadbooks } from "@/lib/roadbook-store";
@@ -46,7 +46,7 @@ export async function POST(request: Request) {
   if (book.city !== "未写明的目的地") {
     const place = normalizeWeatherQuery(book.city);
     const [weather, search] = await Promise.all([
-      getWeather(book.city, Math.min(days, 7), { alternateName: place.alternateName }).catch(() => null),
+      getWeather(book.city, forecastDaysThrough(book.startDate, days, now), { alternateName: place.alternateName }).catch(() => null),
       webSearch(`${book.city} 旅行 开放时间`).catch(() => null),
     ]);
     book = replaceWeather(book, snapsFromReport(weather, book.city, now.toISOString()), now);

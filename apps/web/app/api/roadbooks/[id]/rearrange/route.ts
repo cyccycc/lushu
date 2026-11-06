@@ -1,5 +1,6 @@
 import {
   applyPatch,
+  forecastDaysThrough,
   normalizeWeatherQuery,
   planRain,
   planTired,
@@ -25,7 +26,9 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
     const days = book.items.reduce((max, item) => Math.max(max, item.dayIndex), 1);
     const place = normalizeWeatherQuery(book.city);
     try {
-      const report = await getWeather(book.city, Math.min(days, 7), { alternateName: place.alternateName });
+      const report = await getWeather(book.city, forecastDaysThrough(book.startDate, days), {
+        alternateName: place.alternateName,
+      });
       book = replaceWeather(book, snapsFromReport(report, book.city, new Date().toISOString()));
     } catch {
       // Keep the cached forecast and still apply the rule.

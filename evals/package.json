@@ -5,6 +5,7 @@
   "type": "module",
   "dependencies": {
     "@lushu/agent": "workspace:*",
+    "@lushu/llm": "workspace:*",
     "dotenv": "^16.6.1"
   }
 }

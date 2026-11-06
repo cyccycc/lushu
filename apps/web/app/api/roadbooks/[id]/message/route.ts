@@ -25,13 +25,17 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   }
   if (ruled.note) return Response.json({ error: ruled.note, book }, { status: 400 });
 
-  const env = llmEnvFromRequest(request);
-  if (!env) {
+  const parsed = llmEnvFromRequest(request);
+  if (!parsed.ok) {
     return Response.json(
-      { error: "这句话需要模型。请在浏览器里填写密钥。密钥不会保存到服务器，也不会写进日志。" },
+      {
+        error:
+          parsed.error ?? "这句话需要模型。请在浏览器里填写密钥。密钥不会保存到服务器，也不会写进日志。",
+      },
       { status: 400 },
     );
   }
+  const env = parsed.env;
   try {
     const plan = await proposeModelPatch(book, text, env);
     if (!plan.request) return Response.json({ book, note: plan.note });

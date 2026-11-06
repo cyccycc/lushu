@@ -10,6 +10,7 @@ import {
   planAssumptionEdit,
   planLate,
   planMessage,
+  snapForTripDay,
   undoLast,
   type PatchRequest,
   type Roadbook,
@@ -38,12 +39,16 @@ function span(item: RoadbookItem): string {
 }
 
 function weatherText(book: Roadbook): string {
-  const ready = book.weather.filter((item) => item.available);
-  if (ready.length === 0) return book.weather[0]?.note || "天气还没缓存";
-  return ready
-    .slice(0, 3)
-    .map((item) => `${item.date ?? ""} ${item.condition} ${item.tempMinC ?? "?"}–${item.tempMaxC ?? "?"}°C`)
-    .join(" · ");
+  const days = [...new Set(book.items.map((item) => item.dayIndex))].sort((a, b) => a - b);
+  const lines = days
+    .map((day) => {
+      const snap = snapForTripDay(book, day);
+      if (!snap?.available) return null;
+      return `第${day}天 ${snap.date ?? ""} ${snap.condition} ${snap.tempMinC ?? "?"}–${snap.tempMaxC ?? "?"}°C`;
+    })
+    .filter((line): line is string => Boolean(line));
+  if (lines.length === 0) return book.weather[0]?.note || "天气还没缓存";
+  return lines.join(" · ");
 }
 
 export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: string }) {
@@ -58,7 +63,9 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
   const [editValue, setEditValue] = useState("");
   const [copied, setCopied] = useState(false);
   const [hasKey, setHasKey] = useState(false);
+  const [composerError, setComposerError] = useState("");
   const bookRef = useRef<Roadbook | null>(null);
+  const editingRef = useRef<string | null>(null);
   const bookPane = useRef<HTMLDivElement>(null);
   const talkPane = useRef<HTMLDivElement>(null);
 
@@ -275,6 +282,7 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
   }
 
   function late() {
+    if (busy) return;
     const current = bookRef.current;
     if (!current) return;
     const plan = planLate(current, new Date());
@@ -313,22 +321,23 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
     const raw = text.trim();
     if (!current || !raw) return;
     setText("");
+    setComposerError("");
     if (current.question) {
       const plan = planAnswer(current, raw, rid);
       if (!plan.request) {
-        setNote(plan.note);
+        setComposerError(plan.note || "没有改成。");
         return;
       }
       await commit(plan.request);
       return;
     }
-    const plan = planMessage(current, raw);
+    const plan = planMessage(current, raw, rid);
     if (plan.request) {
       await commit(plan.request);
       return;
     }
     if (plan.note) {
-      setNote(plan.note);
+      setComposerError(plan.note);
       return;
     }
     if (!navigator.onLine) {
@@ -356,14 +365,19 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
   }
 
   async function saveAssumption(assumptionId: string) {
+    if (editingRef.current !== assumptionId) return;
+    editingRef.current = null;
+    setEditing(null);
     const current = bookRef.current;
     if (!current) return;
+    const existing = current.assumptions.find((item) => item.id === assumptionId);
+    if (existing && existing.value === editValue.trim()) return;
     const plan = planAssumptionEdit(current, assumptionId, editValue, rid);
-    setEditing(null);
     if (!plan.request) {
-      setNote(plan.note);
+      setComposerError(plan.note || "没有改成。");
       return;
     }
+    setComposerError("");
     await commit(plan.request);
   }
 
@@ -396,17 +410,27 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
     talk.push({ id: "live", role: "book", text: note });
   }
   const composer = (
-    <form onSubmit={(event) => void onTalk(event)} className="flex gap-2">
-      <input
-        value={text}
-        onChange={(event) => setText(event.target.value)}
-        placeholder={book.question?.prompt || "想改哪里，写一句"}
-        className="min-w-0 flex-1 rounded-xl border border-input bg-card px-3 py-3 text-base"
-      />
-      <button type="submit" className="rounded-xl bg-secondary px-3 text-sm">
-        发送
-      </button>
-    </form>
+    <div className="space-y-2">
+      {composerError ? (
+        <p role="alert" className="rounded-xl border border-red-400 bg-red-50 px-3 py-2 text-base font-medium leading-6 text-red-800">
+          {composerError}
+        </p>
+      ) : null}
+      <form onSubmit={(event) => void onTalk(event)} className="flex gap-2">
+        <input
+          value={text}
+          onChange={(event) => {
+            setText(event.target.value);
+            if (composerError) setComposerError("");
+          }}
+          placeholder={book.question?.prompt || "想改哪里，写一句"}
+          className="min-w-0 flex-1 rounded-xl border border-input bg-card px-3 py-3 text-base"
+        />
+        <button type="submit" className="rounded-xl bg-secondary px-3 text-sm">
+          发送
+        </button>
+      </form>
+    </div>
   );
 
   return (
@@ -455,7 +479,13 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
             </button>
           </div>
         </div>
-        <p className="text-xs leading-5 text-muted-foreground">{note || book.statusLine}</p>
+        {composerError ? (
+          <p role="alert" className="rounded-xl border border-red-400 bg-red-50 px-3 py-2 text-base font-medium leading-6 text-red-800">
+            {composerError}
+          </p>
+        ) : (
+          <p className="text-xs leading-5 text-muted-foreground">{note || book.statusLine}</p>
+        )}
         <p className="text-xs leading-5 text-muted-foreground">
           {book.city} · {weatherText(book)}
           {online ? "" : " · 离线缓存"}
@@ -474,15 +504,25 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
                 <input
                   autoFocus
                   value={editValue}
+                  aria-label={item.label}
                   onChange={(event) => setEditValue(event.target.value)}
-                  className="w-28 rounded-full border border-input bg-background px-2 py-1 text-xs"
+                  onBlur={() => void saveAssumption(item.id)}
+                  className="w-32 rounded-full border border-input bg-background px-3 py-1.5 text-[16px] leading-6"
                 />
+                <button
+                  type="submit"
+                  aria-label="保存"
+                  className="grid h-9 w-9 place-items-center rounded-full bg-primary text-base text-primary-foreground"
+                >
+                  ✓
+                </button>
               </form>
             ) : (
               <button
                 key={item.id}
                 type="button"
                 onClick={() => {
+                  editingRef.current = item.id;
                   setEditing(item.id);
                   setEditValue(item.value);
                 }}
@@ -508,9 +548,14 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
             {dropped.length > 0 ? `刚拿掉：${dropped.map((item) => item.title).join("、")}` : ""}
           </p>
         ) : null}
-        {days.map((day) => (
+        {days.map((day) => {
+          const daySnap = snapForTripDay(book, day);
+          return (
           <section key={day} className="space-y-2">
-            <h2 className="text-sm font-medium">第 {day} 天</h2>
+            <h2 className="text-sm font-medium">
+              第 {day} 天
+              {daySnap?.available ? ` · ${daySnap.date ?? ""} ${daySnap.condition}` : ""}
+            </h2>
             {book.items
               .filter((item) => item.dayIndex === day)
               .sort((a, b) => (parseTime(a.startTime) ?? 0) - (parseTime(b.startTime) ?? 0))
@@ -525,24 +570,54 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
                       {span(item)} {item.title}
                       {item.highlight ? <span className="ml-1 text-xs font-normal text-amber-800">刚改</span> : null}
                     </p>
-                    {item.locked ? (
-                      <span className="text-xs text-muted-foreground">已锁定</span>
-                    ) : (
+                    <div className="flex shrink-0 gap-2">
                       <button
                         type="button"
                         className="text-xs text-primary"
-                        onClick={() =>
+                        onClick={() => {
+                          const done = item.status === "已完成";
                           void commit({
-                            label: `锁定${item.title}`,
+                            label: done ? `${item.title}改回待做` : `完成${item.title}`,
                             kind: "user",
-                            ops: [{ op: "update", id: item.id, fields: { locked: true } }],
-                            statusNote: `已锁定「${item.title}」。重排不会动它。`,
-                          })
-                        }
+                            ops: [{ op: "update", id: item.id, fields: { status: done ? "待做" : "已完成" } }],
+                            statusNote: done ? `「${item.title}」改回待做。` : `「${item.title}」标成已完成。`,
+                          });
+                        }}
                       >
-                        锁定
+                        {item.status === "已完成" ? "改回待做" : "完成"}
                       </button>
-                    )}
+                      {item.locked ? (
+                        <button
+                          type="button"
+                          className="text-xs text-primary"
+                          onClick={() =>
+                            void commit({
+                              label: `解锁${item.title}`,
+                              kind: "user",
+                              ops: [{ op: "update", id: item.id, fields: { locked: false } }],
+                              statusNote: `已解锁「${item.title}」。之后可以再改时间和内容。`,
+                            })
+                          }
+                        >
+                          解锁
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="text-xs text-primary"
+                          onClick={() =>
+                            void commit({
+                              label: `锁定${item.title}`,
+                              kind: "user",
+                              ops: [{ op: "update", id: item.id, fields: { locked: true } }],
+                              statusNote: `已锁定「${item.title}」。重排不会动它。`,
+                            })
+                          }
+                        >
+                          锁定
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <p className="mt-1 text-xs leading-5 text-muted-foreground">
                     {item.place} · {item.type} · {item.priority} · {item.status}
@@ -564,7 +639,8 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
                 </article>
               ))}
           </section>
-        ))}
+          );
+        })}
         {book.verifyChecklist.length > 0 ? (
           <section className="pb-2">
             <h2 className="text-sm font-medium">出发前看一眼</h2>
@@ -593,10 +669,15 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
 
       <footer className="shrink-0 space-y-2 border-t border-border bg-background/95 px-3 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         <p className="text-[11px] text-muted-foreground">
-          {online ? "只改今天未完成、未锁定的项。" : "离线 · 晚了 1 小时仍可用"}
+          {online ? "必去的户外下雨会先问。其余只改今天未完成、未锁定的项。" : "离线 · 晚了 1 小时仍可用"}
         </p>
         <div className="grid grid-cols-3 gap-2">
-          <button type="button" onClick={late} className="min-h-12 rounded-xl bg-primary px-1 text-xs text-primary-foreground">
+          <button
+            type="button"
+            onClick={late}
+            disabled={busy}
+            className="min-h-12 rounded-xl bg-primary px-1 text-xs text-primary-foreground disabled:opacity-50"
+          >
             晚了 1 小时
             <span className="mt-0.5 block text-[10px] opacity-80">可离线</span>
           </button>

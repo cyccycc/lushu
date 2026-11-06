@@ -96,6 +96,9 @@ importers:
       '@lushu/agent':
         specifier: workspace:*
         version: link:../packages/agent
+      '@lushu/llm':
+        specifier: workspace:*
+        version: link:../packages/llm
       dotenv:
         specifier: ^16.6.1
         version: 16.6.1

@@ -1,4 +1,4 @@
-import { guideFor } from "../cities";
+import { guideFor, type Place } from "../cities";
 import { citiesInText } from "@lushu/tools/place";
 import { parseBrief } from "../parse";
 import { inferStartDate } from "./time";
@@ -41,18 +41,120 @@ function item(
   };
 }
 
+function visitPlace(name: string, detail = "你点名要去的地方。开放时间和门票请出发前核实。"): Place {
+  return {
+    name,
+    area: "景区",
+    detail,
+    indoor: false,
+    cost: "mid",
+    keywords: [name],
+  };
+}
+
+const CLIMB_RE = /(?:泰山|黄山|华山|衡山|恒山|嵩山|峨眉山|庐山|普陀山|青城山|武当山|雁荡山|长白山|五台山)$/;
+
+/** User explicitly asked to visit the hero again. Otherwise a must-go place is scheduled once. */
+export function repeatRequested(brief: string): boolean {
+  return /再去一次|去两次|去两趟|回头再去|再访|回访/.test(brief);
+}
+
+function isHero(place: Place, mustVisit: string | null): boolean {
+  if (!mustVisit) return false;
+  return place.name === mustVisit || place.name.includes(mustVisit) || mustVisit.includes(place.name);
+}
+
+function isFullDay(place: Place): boolean {
+  if (place.fullDay) return true;
+  if (CLIMB_RE.test(place.name)) return true;
+  return place.area === "景区" && place.name.endsWith("山") && place.keywords.includes(place.name);
+}
+
+function sightPriority(place: Place, mustVisit: string | null): "必去" | "想去" {
+  if (place.fullDay || isHero(place, mustVisit)) return "必去";
+  return "想去";
+}
+
+function sightPool(city: string, mustVisit: string | null): Place[] {
+  const guide = guideFor(city === "未写明的目的地" ? "待定城市" : city);
+  const daytime = guide.places.filter((item) => !item.evening);
+  const outdoor = daytime.filter((item) => !item.indoor);
+  let pool = outdoor.length >= 4 ? outdoor : [...outdoor, ...daytime.filter((item) => item.indoor)];
+  if (pool.length === 0) pool = [visitPlace(city === "未写明的目的地" ? "城区走走" : `${city}走走`, "开放时间请出发前核实。")];
+  if (!mustVisit) return pool;
+  const hit = guide.places.find((item) => item.name.includes(mustVisit) || mustVisit.includes(item.name));
+  const must = hit ?? visitPlace(mustVisit);
+  return [must, ...pool.filter((item) => item.name !== must.name)];
+}
+
+function claimSight(
+  pool: Place[],
+  used: Map<string, number>,
+  mustVisit: string | null,
+  allowRepeat: boolean,
+): Place | null {
+  const fresh = pool.find((place) => (used.get(place.name) ?? 0) === 0);
+  if (fresh) {
+    used.set(fresh.name, 1);
+    return fresh;
+  }
+  if (!allowRepeat) return null;
+  const again = pool.find((place) => isHero(place, mustVisit) && (used.get(place.name) ?? 0) < 2);
+  if (!again) return null;
+  used.set(again.name, (used.get(again.name) ?? 0) + 1);
+  return again;
+}
+
+function fillerSight(used: Map<string, number>): Place {
+  const options = ["城区再走一段", "公园里坐一会儿", "附近随便走走"];
+  const name = options.find((item) => (used.get(item) ?? 0) === 0) ?? `再走走${used.size + 1}`;
+  used.set(name, (used.get(name) ?? 0) + 1);
+  return visitPlace(name, "赶时间可以整段拿掉。");
+}
+
+function hoursLabel(minutes: number): string {
+  const hours = minutes / 60;
+  return Number.isInteger(hours) ? String(hours) : hours.toFixed(1);
+}
+
+export type DayBuildOptions = {
+  origin: string | null;
+  withReturn?: boolean;
+  mustVisit?: string | null;
+  /** Names already placed, shared across days so a hero is not copied onto a later day. */
+  used?: Map<string, number>;
+  allowRepeat?: boolean;
+};
+
 export function itemsForDay(
   city: string,
   dayIndex: number,
   dayCount: number,
   random: () => string,
-  options: { origin: string | null; withReturn?: boolean } ,
+  options: DayBuildOptions,
 ): RoadbookItem[] {
   const guide = guideFor(city === "未写明的目的地" ? "待定城市" : city);
-  const outdoor = guide.places.filter((place) => !place.indoor && !place.evening);
-  const first = outdoor[0];
-  const second = outdoor[1];
+  const used = options.used ?? new Map<string, number>();
+  const mustVisit = options.mustVisit ?? null;
+  const allowRepeat = options.allowRepeat === true;
+  const pool = sightPool(city, mustVisit);
+  const first = claimSight(pool, used, mustVisit, allowRepeat) ?? fillerSight(used);
   const placeName = city === "未写明的目的地" ? "待定" : city;
+  const arriving = Boolean(options.origin) && dayIndex === 1;
+  const returning = Boolean(options.origin && options.withReturn && dayIndex === dayCount);
+  if (isFullDay(first)) {
+    return fullDayItems(random, {
+      dayIndex,
+      placeName,
+      guide,
+      place: first,
+      mustVisit,
+      origin: options.origin,
+      arriving,
+      returning,
+    });
+  }
+  const second = claimSight(pool, used, mustVisit, allowRepeat) ?? fillerSight(used);
   const items: RoadbookItem[] = [];
   if (options.origin && dayIndex === 1) {
     items.push(
@@ -93,15 +195,15 @@ export function itemsForDay(
       dayIndex,
       startTime: options.origin && dayIndex === 1 ? "11:00" : "10:00",
       durationMinutes: 120,
-      title: first?.name ?? `${placeName}走走`,
-      place: first ? `${placeName} · ${first.area}` : placeName,
+      title: first.name,
+      place: `${placeName} · ${first.area}`,
       type: "景点",
       status: "待做",
       travelEstimateMinutes: 20,
       locked: false,
-      priority: "必去",
-      indoor: false,
-      note: first?.detail,
+      priority: sightPriority(first, mustVisit),
+      indoor: first.indoor,
+      note: first.detail,
     }),
   );
   items.push(
@@ -142,15 +244,15 @@ export function itemsForDay(
         dayIndex,
         startTime: "14:00",
         durationMinutes: 100,
-        title: second?.name ?? "城区再走一段",
-        place: second ? `${placeName} · ${second.area}` : placeName,
+        title: second.name,
+        place: `${placeName} · ${second.area}`,
         type: "景点",
         status: "待做",
         travelEstimateMinutes: 20,
         locked: false,
-        priority: "想去",
-        indoor: second?.indoor ?? false,
-        note: second?.detail,
+        priority: sightPriority(second, mustVisit),
+        indoor: second.indoor,
+        note: second.detail,
       }),
     );
     items.push(
@@ -206,6 +308,144 @@ export function itemsForDay(
   return items;
 }
 
+function fullDayItems(
+  random: () => string,
+  options: {
+    dayIndex: number;
+    placeName: string;
+    guide: { food: string[] };
+    place: Place;
+    mustVisit: string | null;
+    origin: string | null;
+    arriving: boolean;
+    returning: boolean;
+  },
+): RoadbookItem[] {
+  const { dayIndex, placeName, guide, place, mustVisit, origin, arriving, returning } = options;
+  const durationMinutes = arriving && returning ? 330 : arriving || returning ? 360 : 420;
+  const mountain = place.name.endsWith("山");
+  const items: RoadbookItem[] = [];
+  if (arriving && origin) {
+    items.push(
+      item(random, {
+        dayIndex,
+        startTime: "06:30",
+        durationMinutes: 90,
+        title: `从${origin}前往${placeName}`,
+        place: origin,
+        type: "交通",
+        status: "待做",
+        travelEstimateMinutes: 0,
+        locked: false,
+        priority: "必去",
+        indoor: true,
+        note: "时刻按出发理解。票和班次请自己查，路书不代订。",
+      }),
+    );
+  }
+  const climbStart = arriving ? "08:50" : "07:40";
+  items.push(
+    item(random, {
+      dayIndex,
+      startTime: arriving ? "08:10" : "07:00",
+      durationMinutes: 30,
+      title: guide.food[0] ?? "早餐",
+      place: placeName,
+      type: "餐",
+      status: "待做",
+      travelEstimateMinutes: 10,
+      locked: false,
+      priority: "想去",
+      indoor: true,
+      note: "出发前吃完，不要把正餐留在景区门口。",
+    }),
+  );
+  items.push(
+    item(random, {
+      dayIndex,
+      startTime: climbStart,
+      durationMinutes,
+      title: place.name,
+      place: `${placeName} · ${place.area}`,
+      type: "景点",
+      status: "待做",
+      travelEstimateMinutes: 20,
+      locked: false,
+      priority: sightPriority(place, mustVisit),
+      indoor: place.indoor,
+      note: mountain
+        ? `登${place.name}按一整天排，大约 ${hoursLabel(durationMinutes)} 小时，含上下山。开放时间和路线请出发前核实。`
+        : `${place.name}按一整天排，大约 ${hoursLabel(durationMinutes)} 小时，这一天不再叠别的景点。开放时间请出发前核实。`,
+    }),
+  );
+  items.push(
+    item(random, {
+      dayIndex,
+      startTime: arriving && returning ? "14:30" : returning ? "13:50" : arriving ? "15:10" : "15:00",
+      durationMinutes: returning ? 40 : 60,
+      title: guide.food[1] ?? "午餐",
+      place: placeName,
+      type: "餐",
+      status: "待做",
+      travelEstimateMinutes: 10,
+      locked: false,
+      priority: "想去",
+      indoor: true,
+    }),
+  );
+  if (returning && origin) {
+    items.push(
+      item(random, {
+        dayIndex,
+        startTime: arriving ? "15:20" : "14:40",
+        durationMinutes: 90,
+        title: `返回${origin}`,
+        place: placeName,
+        type: "交通",
+        status: "待做",
+        travelEstimateMinutes: 15,
+        locked: false,
+        priority: "必去",
+        indoor: true,
+        note: "返程自己查班次。路书不代订。",
+      }),
+    );
+  } else {
+    items.push(
+      item(random, {
+        dayIndex,
+        startTime: "16:20",
+        durationMinutes: 40,
+        title: mountain ? "山下歇一歇" : "看完歇一歇",
+        place: placeName,
+        type: "休息",
+        status: "待做",
+        travelEstimateMinutes: 10,
+        locked: false,
+        priority: "可砍",
+        indoor: true,
+        note: "这一天的主行程已经够长，这里只是歇脚。",
+      }),
+    );
+  }
+  items.push(
+    item(random, {
+      dayIndex,
+      startTime: "18:00",
+      durationMinutes: 70,
+      title: guide.food[2] ?? "晚饭",
+      place: placeName,
+      type: "餐",
+      status: "待做",
+      travelEstimateMinutes: 15,
+      locked: false,
+      priority: "想去",
+      indoor: true,
+    }),
+  );
+  return items;
+}
+
 function assumption(
   random: () => string,
   fields: Omit<Assumption, "id">,
@@ -223,8 +463,15 @@ export function buildDraft(brief: string, options: DraftOptions): Roadbook {
   const landmark = citiesInText(text).find((hit) => hit.city === city)?.landmark ?? null;
   const cityInferred = !known && city !== "未写明的目的地";
   const withReturn = Boolean(spec.origin) && spec.days <= 3;
+  const used = new Map<string, number>();
   const items = Array.from({ length: spec.days }, (_, index) =>
-    itemsForDay(city, index + 1, spec.days, random, { origin: spec.origin, withReturn }),
+    itemsForDay(city, index + 1, spec.days, random, {
+      origin: spec.origin,
+      withReturn,
+      mustVisit: landmark,
+      used,
+      allowRepeat: repeatRequested(text),
+    }),
   ).flat();
   const assumptions: Assumption[] = [
     assumption(random, {

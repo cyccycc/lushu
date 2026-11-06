@@ -20,6 +20,7 @@ import {
 import { coercePlan } from "./normalize";
 import { parseBrief } from "./parse";
 import { planUserPrompt, synthUserPrompt, SYSTEM_PROMPT } from "./prompts";
+import { forecastDaysThrough, inferStartDate } from "./roadbook/time";
 import { attachWeather } from "./weather-view";
 import type { AgentLimits, AgentResult, AgentStep, AgentUsage, ToolBundle, TripSpec } from "./types";
 
@@ -166,7 +167,7 @@ async function collectTools(
     const step = openStep(steps, "searching", `天气：${city}`, "正在查未来几天的预报。");
     emit(steps, usage, options.onStep);
     try {
-      const report = await getWeather(city, Math.min(spec.days, 7), {
+      const report = await getWeather(city, forecastDaysThrough(inferStartDate(spec.whenLabel, new Date()), spec.days), {
         mode,
         alternateName: guideFor(city).english,
       });
@@ -297,7 +298,11 @@ export async function runTravelAgent(brief: string, options: RunOptions = {}): P
   }
   emit(steps, usage, options.onStep);
 
-  const finalVariants = attachWeather(variants ?? buildFallbackVariants(spec, bundle, mode), bundle.weather);
+  const finalVariants = attachWeather(
+    variants ?? buildFallbackVariants(spec, bundle, mode),
+    bundle.weather,
+    inferStartDate(spec.whenLabel, new Date()),
+  );
   const finalContrast = contrast || contrastFor(finalVariants);
   const confirm = openStep(steps, "awaiting_confirm", "等你选一套", "选中之后生成可以分享的行程页。");
   closeStep(confirm, "两套方案可以比较了。");

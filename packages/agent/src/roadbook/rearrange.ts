@@ -1,6 +1,7 @@
 import { guideFor } from "../cities";
 import { projectPatch } from "./patch";
-import { DAY_END_MINUTES, formatTime, parseTime, targetDayIndex } from "./time";
+import { DAY_END_MINUTES, endMinutes, formatTime, parseTime, shanghaiMinutes, targetDayIndex } from "./time";
+import { snapForTripDay } from "./weather";
 import type { PatchOp, Plan, Priority, Roadbook, RoadbookItem } from "./types";
 
 function cutRank(item: RoadbookItem): number {
@@ -34,10 +35,22 @@ function overflowItem(items: RoadbookItem[], dayIndex: number): RoadbookItem | u
   });
 }
 
+function stillOpen(item: RoadbookItem, nowMinutes: number, useClock: boolean): boolean {
+  if (!useClock) return true;
+  const end = endMinutes(item.startTime, item.durationMinutes);
+  if (end == null) return true;
+  return end > nowMinutes;
+}
+
 export function planLate(book: Roadbook, now = new Date()): Plan {
   const target = targetDayIndex(book, now);
+  const nowMinutes = shanghaiMinutes(now);
   const movable = book.items.filter(
-    (item) => item.dayIndex === target.dayIndex && item.status === "待做" && !item.locked,
+    (item) =>
+      item.dayIndex === target.dayIndex &&
+      item.status === "待做" &&
+      !item.locked &&
+      stillOpen(item, nowMinutes, !target.outOfRange),
   );
   const prefix = target.outOfRange ? "今天不在行程日期里，已按第 1 天试算。" : "";
   if (movable.length === 0) {
@@ -97,11 +110,15 @@ export function planLate(book: Roadbook, now = new Date()): Plan {
 }
 
 function weatherLine(book: Roadbook, dayIndex: number): string {
-  const dated = book.weather.filter((item) => item.available);
-  const picked = dated[dayIndex - 1] ?? dated[0] ?? book.weather[0];
-  if (!picked || !picked.available) return "没有可用预报，仍按雨天改了户外项。";
+  const picked = snapForTripDay(book, dayIndex);
+  if (!picked || !picked.available) return "没有这一天的预报，仍按雨天改了户外项。";
   const precip = picked.precipProbability == null ? "降水未知" : `降水 ${picked.precipProbability}%`;
   return `预报 ${picked.condition}，${precip}。`;
+}
+
+function rainAsk(title: string, alternative: string | null): string {
+  const suggestion = alternative ? `室内可以改去${alternative}。` : "";
+  return `${title}是户外，下雨要不要去？${suggestion}`;
 }
 
 export function planRain(book: Roadbook, now = new Date()): Plan {
@@ -112,11 +129,18 @@ export function planRain(book: Roadbook, now = new Date()): Plan {
   const used = new Set(book.items.map((item) => item.title));
   const ops: PatchOp[] = [];
   const lockedOutdoor: string[] = [];
+  const asks: string[] = [];
   for (const item of book.items) {
     if (item.dayIndex !== target.dayIndex || item.status !== "待做") continue;
     if (item.type !== "景点" || item.indoor) continue;
     if (item.locked) {
       lockedOutdoor.push(item.title);
+      continue;
+    }
+    if (item.priority === "必去") {
+      const alt = indoor.find((place) => !used.has(place.name));
+      if (alt) used.add(alt.name);
+      asks.push(rainAsk(item.title, alt?.name ?? null));
       continue;
     }
     const alt = indoor.find((place) => !used.has(place.name));
@@ -148,21 +172,25 @@ export function planRain(book: Roadbook, now = new Date()): Plan {
       },
     });
   }
-  if (ops.length === 0 && lockedOutdoor.length === 0) {
+  if (ops.length === 0 && lockedOutdoor.length === 0 && asks.length === 0) {
     return { request: null, note: `${prefix}今天没有需要改的户外景点。`.trim() };
   }
   const forecast = weatherLine(book, target.dayIndex);
   const kept = lockedOutdoor.length ? `锁定的户外仍保留：${lockedOutdoor.join("、")}。` : "";
-  const note = `${prefix}${forecast}${kept || "户外景点已改成室内。"}`.trim();
+  const askText = asks.join("");
+  const changed = ops.length ? "其他户外景点已改成室内。" : "";
+  const note = `${prefix}${forecast}${askText}${kept}${changed}`.trim();
+  const verifyAdds = [
+    ...(lockedOutdoor.length ? [`锁定的户外仍保留：${lockedOutdoor.join("、")}。下雨要不要去，自己定。`] : []),
+    ...asks,
+  ];
   return {
     request: {
-      label: "下雨了",
+      label: asks[0] ?? "下雨了",
       kind: "rain",
       ops,
       statusNote: note,
-      verifyAdds: lockedOutdoor.length
-        ? [`锁定的户外仍保留：${lockedOutdoor.join("、")}。下雨要不要去，自己定。`]
-        : [],
+      verifyAdds,
     },
     note,
   };
@@ -173,15 +201,16 @@ let restSerial = 0;
 export function planTired(book: Roadbook, now = new Date(), random?: () => string): Plan {
   const target = targetDayIndex(book, now);
   const prefix = target.outOfRange ? "今天不在行程日期里，已按第 1 天试算。" : "";
+  const nowMinutes = shanghaiMinutes(now);
   const today = book.items.filter((item) => item.dayIndex === target.dayIndex && item.status === "待做" && !item.locked);
   if (today.length === 0) return { request: null, note: `${prefix}今天没有能减的未完成项。`.trim() };
   const ops: PatchOp[] = [];
   const cut: string[] = [];
   for (const item of today) {
+    if (!stillOpen(item, nowMinutes, !target.outOfRange)) continue;
     const drop =
       item.type === "自由" ||
-      (item.priority === "可砍" && item.type !== "餐" && item.type !== "交通") ||
-      item.type === "休息";
+      (item.priority === "可砍" && item.type !== "餐" && item.type !== "交通" && item.type !== "休息");
     if (drop && item.priority !== "必去") {
       ops.push({ op: "remove", id: item.id });
       cut.push(item.title);
@@ -203,7 +232,12 @@ export function planTired(book: Roadbook, now = new Date(), random?: () => strin
   }
   const anchor = today.find((item) => item.type === "景点" && item.priority === "必去" && !cut.includes(item.title));
   const start = anchor ? parseTime(anchor.startTime) : 15 * 60;
-  const restStart = start == null ? "15:00" : formatTime(Math.min(start + 75, 16 * 60));
+  let restAt = start == null ? 15 * 60 : Math.min(start + 75, 16 * 60);
+  if (!target.outOfRange && restAt <= nowMinutes) restAt = nowMinutes + 10;
+  if (restAt > 23 * 60) {
+    return { request: null, note: `${prefix}今天剩下的时间排不下休息。`.trim() };
+  }
+  const restStart = formatTime(restAt);
   restSerial += 1;
   const restId = `i_${random ? random() : `rest${restSerial}`}`;
   ops.push({

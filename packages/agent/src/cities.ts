@@ -386,6 +386,12 @@ export function guideFor(name: string): CityGuide {
         cost: "low",
         keywords: ["吃", "美食", "小吃"],
       }),
+      place("城市公园", "城区", "一段平路，累了就坐下。", {
+        keywords: ["散步", "公园"],
+      }),
+      place("老街走一段", "老街", "看一条街就离开，不把正餐安排在街上。", {
+        keywords: ["老街"],
+      }),
     ],
   };
 }

@@ -1,3 +1,4 @@
+export { blockedModelUrlMessage, isBlockedLlmHost, modelHttpError, publicHttpsBase, resolveLlmBase } from "./base";
 export { chatComplete, LlmError } from "./client";
 export type { ChatMessage, ChatResult } from "./client";
 export { estimateCostUsd } from "./cost";

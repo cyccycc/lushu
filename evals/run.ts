@@ -1,3 +1,4 @@
+import { blockedModelUrlMessage, modelHttpError, publicHttpsBase, resolveLlmBase } from "@lushu/llm";
 import { config } from "dotenv";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
@@ -20,12 +21,15 @@ import {
 import {
   applyPatch,
   buildDraft,
+  forecastDaysThrough,
   normalizeWeatherQuery,
   parseTime,
   planAssumptionEdit,
   planLate,
+  planMessage,
   planRain,
   planTired,
+  snapForTripDay,
   undoLast,
   type RoadbookItem,
 } from "@lushu/agent/roadbook";
@@ -331,10 +335,15 @@ function assertRoadbook(): string | null {
   const lockedAfter = shifted.book.items.find((item) => item.id === lake.id);
   if (!lockedAfter || lockedAfter.startTime !== lake.startTime) return "晚了 1 小时不应挪动锁定项";
   const breakfastAfter = shifted.book.items.find((item) => item.id === breakfast.id);
-  const beforeMin = parseTime(breakfast.startTime);
-  const afterMin = breakfastAfter ? parseTime(breakfastAfter.startTime) : null;
+  if (!breakfastAfter || breakfastAfter.startTime !== breakfast.startTime) {
+    return `已结束的早餐不应被顺延，${breakfast.startTime} -> ${breakfastAfter?.startTime}`;
+  }
+  const lunch = book.items.find((item) => item.dayIndex === 1 && item.startTime === "12:30");
+  const lunchAfter = lunch ? shifted.book.items.find((item) => item.id === lunch.id) : undefined;
+  const beforeMin = lunch ? parseTime(lunch.startTime) : null;
+  const afterMin = lunchAfter ? parseTime(lunchAfter.startTime) : null;
   if (beforeMin == null || afterMin == null || afterMin < beforeMin + 60) {
-    return `早餐应至少顺延 60 分钟，${breakfast.startTime} -> ${breakfastAfter?.startTime}`;
+    return `未结束的午餐应至少顺延 60 分钟，${lunch?.startTime} -> ${lunchAfter?.startTime}`;
   }
   if (shifted.book.items.some((item) => item.title === "可砍的夜走" && item.dayIndex === 1)) {
     return "放不下的可砍项应被砍掉";
@@ -373,8 +382,16 @@ function assertRoadbook(): string | null {
   if (!rain.request) return rain.note;
   const rained = applyPatch(rainy, { ...rain.request, id: "p_rain" });
   if (!rained.ok) return rained.error;
-  if (rained.book.items.some((item) => item.dayIndex === 1 && item.title === "西湖" && !item.locked)) {
-    return "下雨应把未锁定的西湖改掉";
+  const lakeAfterRain = rained.book.items.find((item) => item.id === lake.id);
+  if (!lakeAfterRain || lakeAfterRain.title !== "西湖" || lakeAfterRain.indoor) {
+    return "下雨不应直接换掉未锁定的必去西湖";
+  }
+  if (!rain.note.includes("西湖是户外，下雨要不要去")) return `下雨应询问必去户外：${rain.note}`;
+  if (!rained.book.verifyChecklist.some((item) => item.text.includes("西湖是户外，下雨要不要去"))) {
+    return "下雨应把必去户外写进核实清单";
+  }
+  if (rained.book.items.some((item) => item.dayIndex === 1 && item.title === "灵隐寺")) {
+    return "下雨仍应替换未锁定、非必去的户外景点";
   }
   const tired = planTired(book, now, random);
   if (!tired.request) return tired.note;
@@ -386,6 +403,226 @@ function assertRoadbook(): string | null {
   if (rested.book.items.some((item) => item.dayIndex === 1 && item.type === "自由")) {
     return "累了应砍掉自由活动";
   }
+  const keptRest: RoadbookItem = {
+    ...breakfast,
+    id: "i_oldrest",
+    startTime: "21:10",
+    durationMinutes: 20,
+    title: "原来的休息",
+    type: "休息",
+    priority: "想去",
+    indoor: true,
+    locked: false,
+    status: "待做",
+    highlight: false,
+  };
+  const withRest = { ...book, items: [...book.items, keptRest] };
+  const tiredKeep = planTired(withRest, now, random);
+  if (!tiredKeep.request) return tiredKeep.note;
+  if (tiredKeep.request.ops.some((op) => op.op === "remove" && op.id === keptRest.id)) {
+    return "累了不应砍掉已有休息";
+  }
+  const keptApplied = applyPatch(withRest, { ...tiredKeep.request, id: "p_keeprest" });
+  if (!keptApplied.ok) return keptApplied.error;
+  if (!keptApplied.book.items.some((item) => item.id === keptRest.id)) return "累了应留下已有休息";
+  const evening = planTired(book, new Date("2026-11-14T10:00:00Z"), random);
+  if (!evening.request) return evening.note;
+  const eveningBook = applyPatch(book, { ...evening.request, id: "p_evening" });
+  if (!eveningBook.ok) return eveningBook.error;
+  const sit = eveningBook.book.items.find((item) => item.title === "坐下休息");
+  const sitStart = sit ? parseTime(sit.startTime) : null;
+  if (sitStart == null || sitStart <= 18 * 60) return `休息应排在现在之后，得到 ${sit?.startTime}`;
+
+  const day1Sights = new Set(
+    book.items.filter((item) => item.dayIndex === 1 && item.type === "景点").map((item) => item.title),
+  );
+  const day2Sights = book.items.filter((item) => item.dayIndex === 2 && item.type === "景点").map((item) => item.title);
+  if (day2Sights.length < 1 || day2Sights.some((title) => day1Sights.has(title))) {
+    return `第 2 天景点应和第 1 天错开：${day2Sights.join(",")}`;
+  }
+  const tai = parseBrief("想去泰山，两天");
+  if (tai.destinations[0] !== "泰安") return `泰山应解析为泰安，得到 ${tai.destinations.join(",")}`;
+  const taiBook = buildDraft("想去泰山，两天", { id: "tai", now, random });
+  if (taiBook.city !== "泰安") return `泰山草稿城市 ${taiBook.city}`;
+  if (!taiBook.items.some((item) => item.title.includes("泰山") && item.priority === "必去")) {
+    return "泰山应作为必去写进草稿";
+  }
+  const tai3 = buildDraft("想去泰山，三天", { id: "tai3", now, random });
+  const taiSeen = tai3.items.filter((item) => item.type === "景点" && item.title.includes("泰山"));
+  if (taiSeen.length !== 1) {
+    return `泰山应只出现一次，得到 ${taiSeen.map((item) => `${item.dayIndex} ${item.startTime}`).join(",")}`;
+  }
+  if (tai3.items.some((item) => item.title === "老街走一段" && item.priority === "必去")) {
+    return "老街走一段不应标成必去";
+  }
+  const tai1 = buildDraft("想去泰山，一天", { id: "tai1", now, random });
+  const climb = tai1.items.find((item) => item.type === "景点" && item.title.includes("泰山"));
+  if (!climb || climb.durationMinutes < 300 || climb.durationMinutes > 480) {
+    return `一日泰山应为 5–8 小时，得到 ${climb?.durationMinutes}`;
+  }
+  if (tai1.items.some((item) => item.title === "中心城区步行")) return "一日泰山不应排中心城区步行";
+  const taiDays = tai3.assumptions.find((item) => item.key === "days");
+  if (!taiDays) return "泰山草稿缺少天数";
+  const toOne = planAssumptionEdit(tai3, taiDays.id, "1 天", random, now);
+  if (!toOne.request) return toOne.note;
+  const oneApplied = applyPatch(tai3, { ...toOne.request, id: "p_tai1" });
+  if (!oneApplied.ok) return oneApplied.error;
+  const climbs = oneApplied.book.items.filter((item) => item.type === "景点" && item.title.includes("泰山"));
+  if (climbs.length !== 1 || !climbs[0] || climbs[0].durationMinutes < 300 || climbs[0].durationMinutes > 480) {
+    return `缩短成 1 天后泰山应为一次 5–8 小时，得到 ${climbs.map((item) => item.durationMinutes).join(",")}`;
+  }
+  if (oneApplied.book.items.some((item) => item.title === "中心城区步行")) {
+    return "缩短成 1 天后不应留下中心城区步行";
+  }
+
+  const daysTag = book.assumptions.find((item) => item.key === "days");
+  if (!daysTag) return "缺少天数假设";
+  const three = planMessage(book, "改成3天", random, now);
+  if (!three.request || three.request.kind !== "assumption") return `「3天」应改假设：${three.note}`;
+  const threeBook = applyPatch(book, { ...three.request, id: "p_days3" });
+  if (!threeBook.ok) return threeBook.error;
+  if (!threeBook.book.items.some((item) => item.dayIndex === 3)) return "改成 3 天应生成第 3 天";
+  if (threeBook.book.assumptions.find((item) => item.key === "days")?.value !== "3 天") return "天数标签应是 3 天";
+  const lockedDays = {
+    ...book,
+    items: book.items.map((item) => (item.id === lake.id ? { ...item, locked: true } : item)),
+  };
+  const regen = planAssumptionEdit(lockedDays, daysTag.id, "3 天", random, now);
+  if (!regen.request) return regen.note;
+  const regenBook = applyPatch(lockedDays, { ...regen.request, id: "p_regen" });
+  if (!regenBook.ok) return regenBook.error;
+  const keptLake = regenBook.book.items.find((item) => item.id === lake.id);
+  if (!keptLake?.locked || keptLake.startTime !== lake.startTime || keptLake.title !== "西湖") {
+    return "改天数应保留锁定的西湖";
+  }
+  if (regenBook.book.items.some((item) => item.id === breakfast.id)) return "未锁定项应在改天数时重排";
+  const day2Item = book.items.find((item) => item.dayIndex === 2);
+  if (!day2Item) return "草稿应有第 2 天";
+  const blockedShort = planAssumptionEdit(
+    { ...book, items: book.items.map((item) => (item.id === day2Item.id ? { ...item, locked: true } : item)) },
+    daysTag.id,
+    "1 天",
+    random,
+    now,
+  );
+  if (blockedShort.request) return "缩短时不应丢掉范围外的锁定项";
+  const tea: RoadbookItem = {
+    ...breakfast,
+    id: "i_tea",
+    title: "我的茶歇",
+    type: "休息",
+    startTime: "16:30",
+    durationMinutes: 40,
+    priority: "想去",
+    indoor: true,
+    locked: false,
+    note: "自己加的",
+    source: { kind: "推断", note: "用户添加" },
+  };
+  const withTea = applyPatch(book, {
+    id: "p_tea",
+    label: "加上我的茶歇",
+    kind: "user",
+    ops: [{ op: "add", item: tea }],
+  });
+  if (!withTea.ok) return withTea.error;
+  const notedBreakfast = applyPatch(withTea.book, {
+    id: "p_breakfast_note",
+    label: "改早餐",
+    kind: "user",
+    ops: [{ op: "update", id: breakfast.id, fields: { note: "少油" } }],
+  });
+  if (!notedBreakfast.ok) return notedBreakfast.error;
+  const shortenTea = planAssumptionEdit(notedBreakfast.book, daysTag.id, "1 天", random, now);
+  if (!shortenTea.request) return shortenTea.note;
+  if (!shortenTea.note.includes("未锁定的改动已重排")) return `改天数应提示未锁定改动：${shortenTea.note}`;
+  const teaBook = applyPatch(notedBreakfast.book, { ...shortenTea.request, id: "p_tea_short" });
+  if (!teaBook.ok) return teaBook.error;
+  if (!teaBook.book.items.some((item) => item.id === "i_tea" && item.title === "我的茶歇")) {
+    return "缩短天数应留下用户加的茶歇";
+  }
+  if (teaBook.book.items.some((item) => item.id === breakfast.id)) return "未锁定的原早餐仍应重排";
+  const party = planMessage(book, "改成4个人", random, now);
+  if (!party.request?.assumptions?.some((item) => item.key === "party" && item.value === "4 个人")) {
+    return `人数应改成 4 个人：${party.note}`;
+  }
+  const when = book.assumptions.find((item) => item.key === "when");
+  if (!when) return "缺少时间假设";
+  const sat = planAssumptionEdit(book, when.id, "周六", random, new Date("2026-11-13T04:00:00Z"));
+  if (sat.request?.startDate !== "2026-11-14") return `周六应是 2026-11-14，得到 ${sat.request?.startDate}`;
+
+  const unlocked = applyPatch(lockedBook, {
+    id: "p_unlock",
+    label: "解锁",
+    kind: "user",
+    ops: [{ op: "update", id: lake.id, fields: { locked: false } }],
+  });
+  if (!unlocked.ok) return unlocked.error;
+  if (unlocked.book.items.find((item) => item.id === lake.id)?.locked) return "应能解锁";
+  const doneLocked = applyPatch(lockedBook, {
+    id: "p_done_locked",
+    label: "完成锁定",
+    kind: "user",
+    ops: [{ op: "update", id: lake.id, fields: { status: "已完成" } }],
+  });
+  if (!doneLocked.ok) return `锁定项应能改状态：${doneLocked.error}`;
+  const doneLake = doneLocked.book.items.find((item) => item.id === lake.id);
+  if (doneLake?.status !== "已完成" || doneLake.locked !== true) return "改状态不应解除锁定";
+
+  const horizon = forecastDaysThrough("2026-11-16", 3, new Date("2026-11-14T02:00:00Z"));
+  if (horizon < 5) return `预报应盖到行程最后一天，得到 ${horizon} 天`;
+  const shiftedWeather = {
+    ...book,
+    startDate: "2026-11-16",
+    weather: [
+      { ...rainy.weather[0], date: "2026-11-14", condition: "晴", precipProbability: 0 },
+      { ...rainy.weather[0], date: "2026-11-16", condition: "大雨", precipProbability: 90 },
+    ],
+  };
+  if (snapForTripDay(shiftedWeather, 1)?.date !== "2026-11-16") return "天气应按出发日加天数对齐";
+  const datedRain = planRain(shiftedWeather, new Date("2026-11-16T02:00:00Z"));
+  if (!datedRain.note.includes("大雨")) return `下雨应使用当天预报，得到 ${datedRain.note}`;
+  return null;
+}
+
+function assertLlmBase(): string | null {
+  const fallback = "https://api.deepseek.com/v1";
+  const rejected = [
+    "http://127.0.0.1/v1",
+    "https://127.0.0.1/v1",
+    "https://localhost/v1",
+    "https://10.1.2.3/v1",
+    "https://192.168.1.8/v1",
+    "https://172.16.0.4/v1",
+    "https://169.254.169.254/latest",
+    "https://[::1]/v1",
+    "https://metadata.google.internal/",
+    "http://api.example.com/v1",
+    "https://user:pass@api.example.com/v1",
+  ];
+  for (const input of rejected) {
+    const got = publicHttpsBase(input, fallback);
+    if (got !== fallback) return `${input} 应拒绝，得到 ${got}`;
+  }
+  const kept = publicHttpsBase("https://api.example.com/v1/", fallback);
+  if (kept !== "https://api.example.com/v1") return `公开地址被改成 ${kept}`;
+  const message = modelHttpError(502);
+  if (!message.includes("502") || message.includes("{") || message.includes("：")) {
+    return "模型错误不应回显响应体";
+  }
+  const blockedBase = resolveLlmBase("https://10.1.2.3/v1", fallback);
+  if (blockedBase.ok) return "内网模型地址应拒绝，而不是改去默认接口";
+  const httpBase = resolveLlmBase("http://api.example.com/v1", fallback);
+  if (httpBase.ok) return "非 https 模型地址应拒绝";
+  const emptyBase = resolveLlmBase("  ", fallback);
+  if (!emptyBase.ok || emptyBase.baseURL !== fallback) return "没填模型地址时应使用默认接口";
+  const keptBase = resolveLlmBase("https://api.example.com/v1/", fallback);
+  if (!keptBase.ok || keptBase.baseURL !== "https://api.example.com/v1") return "公开模型地址应保留";
+  const auth = modelHttpError(401);
+  if (!auth.includes("密钥") || auth.includes("401") || auth.includes("不允许使用")) {
+    return `401 应说明密钥：${auth}`;
+  }
+  if (!blockedModelUrlMessage.includes("这个模型地址不允许使用")) return "拦截文案应写明地址不允许使用";
   return null;
 }
 
@@ -409,6 +646,11 @@ async function main(): Promise<void> {
   const roadbookError = assertRoadbook();
   if (roadbookError) {
     console.error(`roadbook  ${roadbookError}`);
+    process.exit(1);
+  }
+  const baseError = assertLlmBase();
+  if (baseError) {
+    console.error(`llm-base  ${baseError}`);
     process.exit(1);
   }
   console.log("  ok roadbook patch, undo, late, rain, tired");
