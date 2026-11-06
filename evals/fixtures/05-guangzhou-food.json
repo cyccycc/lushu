@@ -1,0 +1,9 @@
+{
+  "id": "05-guangzhou-food",
+  "title": "广州吃",
+  "brief": "四天广州，两个人，行程围绕早茶、糖水和夜宵，景点点到为止。",
+  "checks": {
+    "minDays": 4,
+    "keywords": ["广州", "早茶"]
+  }
+}

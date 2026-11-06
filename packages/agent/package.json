@@ -1,0 +1,16 @@
+{
+  "name": "@lushu/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./text": "./src/weather-view.ts",
+    "./roadbook": "./src/roadbook/index.ts",
+    "./roadbook-server": "./src/roadbook/server.ts"
+  },
+  "dependencies": {
+    "@lushu/llm": "workspace:*",
+    "@lushu/tools": "workspace:*"
+  }
+}

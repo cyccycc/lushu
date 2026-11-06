@@ -1,0 +1,19 @@
+{
+  "name": "路书",
+  "short_name": "路书",
+  "description": "一句就出可改的行程。不代订，不收款。",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f1e6",
+  "theme_color": "#2f6f5e",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

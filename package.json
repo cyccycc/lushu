@@ -1,0 +1,22 @@
+{
+  "name": "lushu",
+  "private": true,
+  "version": "0.1.0",
+  "description": "路书 — a personal travel-planning agent. Plans trips. Does not book or charge.",
+  "packageManager": "pnpm@10.33.4",
+  "scripts": {
+    "dev": "pnpm --filter @lushu/web dev",
+    "build": "pnpm --filter @lushu/web build",
+    "start": "pnpm --filter @lushu/web start",
+    "lint": "pnpm --filter @lushu/web lint",
+    "typecheck": "tsc --noEmit -p packages/llm/tsconfig.json && tsc --noEmit -p packages/tools/tsconfig.json && tsc --noEmit -p packages/agent/tsconfig.json && tsc --noEmit -p evals/tsconfig.json && pnpm --filter @lushu/web typecheck",
+    "eval": "tsx evals/run.ts",
+    "eval:live": "tsx evals/run.ts --live"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "dotenv": "^16.6.1",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

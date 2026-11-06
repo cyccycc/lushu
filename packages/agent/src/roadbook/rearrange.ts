@@ -1,0 +1,239 @@
+import { guideFor } from "../cities";
+import { projectPatch } from "./patch";
+import { DAY_END_MINUTES, formatTime, parseTime, targetDayIndex } from "./time";
+import type { PatchOp, Plan, Priority, Roadbook, RoadbookItem } from "./types";
+
+function cutRank(item: RoadbookItem): number {
+  if (item.locked || item.status !== "待做" || item.priority === "必去") return 1000;
+  if (item.type === "交通") return 80;
+  if (item.type === "餐") return 70;
+  if (item.type === "景点" && item.priority === "想去") return 50;
+  if (item.priority === "想去") return 40;
+  if (item.type === "休息") return 10;
+  if (item.type === "自由") return 0;
+  if (item.priority === "可砍") return 5;
+  return 30;
+}
+
+function pickCut(items: RoadbookItem[]): RoadbookItem | null {
+  const candidates = items.filter((item) => cutRank(item) < 1000);
+  candidates.sort((a, b) => {
+    const rank = cutRank(a) - cutRank(b);
+    if (rank !== 0) return rank;
+    return (parseTime(b.startTime) ?? 0) - (parseTime(a.startTime) ?? 0);
+  });
+  return candidates[0] ?? null;
+}
+
+function overflowItem(items: RoadbookItem[], dayIndex: number): RoadbookItem | undefined {
+  return items.find((item) => {
+    if (item.dayIndex !== dayIndex || item.locked || item.status !== "待做" || item.priority === "必去") return false;
+    const start = parseTime(item.startTime);
+    if (start == null) return false;
+    return start + item.durationMinutes > DAY_END_MINUTES;
+  });
+}
+
+export function planLate(book: Roadbook, now = new Date()): Plan {
+  const target = targetDayIndex(book, now);
+  const movable = book.items.filter(
+    (item) => item.dayIndex === target.dayIndex && item.status === "待做" && !item.locked,
+  );
+  const prefix = target.outOfRange ? "今天不在行程日期里，已按第 1 天试算。" : "";
+  if (movable.length === 0) {
+    return { request: null, note: `${prefix}没有能顺延的未完成项。`.trim() };
+  }
+  const removed = new Set<string>();
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const ops: PatchOp[] = [];
+    for (const id of removed) ops.push({ op: "remove", id });
+    let shifted = 0;
+    for (const item of movable) {
+      if (removed.has(item.id)) continue;
+      const start = parseTime(item.startTime);
+      if (start == null) return { request: null, note: `「${item.title}」的时间无法解析。` };
+      if (start + 60 >= 24 * 60) {
+        removed.add(item.id);
+        continue;
+      }
+      ops.push({
+        op: "update",
+        id: item.id,
+        fields: { startTime: formatTime(start + 60) },
+      });
+      shifted += 1;
+    }
+    if (shifted === 0 && removed.size === 0) {
+      return { request: null, note: "没有能顺延的时间。" };
+    }
+    const projected = projectPatch(book, { label: "晚了 1 小时", kind: "late", ops });
+    if (!projected.ok) {
+      const victim = pickCut(movable.filter((item) => !removed.has(item.id)));
+      if (!victim) return { request: null, note: projected.error };
+      removed.add(victim.id);
+      continue;
+    }
+    const late = overflowItem(projected.items, target.dayIndex);
+    if (!late) {
+      const cutTitles = book.items.filter((item) => removed.has(item.id)).map((item) => item.title);
+      const cut = cutTitles.length ? `放不下，砍了${cutTitles.join("、")}。` : "未完成的项顺延 1 小时。";
+      const note = `${prefix}${cut}`.trim();
+      return {
+        request: { label: "晚了 1 小时", kind: "late", ops, statusNote: note },
+        note,
+      };
+    }
+    const victim = pickCut(projected.items.filter((item) => item.dayIndex === target.dayIndex)) ?? late;
+    if (cutRank(victim) >= 1000) {
+      const note = `${prefix}必去项会晚于 21:30，已保留并顺延其余项。`.trim();
+      return {
+        request: { label: "晚了 1 小时", kind: "late", ops, statusNote: note },
+        note,
+      };
+    }
+    removed.add(victim.id);
+  }
+  return { request: null, note: "没能把今天排进 21:30 之前。" };
+}
+
+function weatherLine(book: Roadbook, dayIndex: number): string {
+  const dated = book.weather.filter((item) => item.available);
+  const picked = dated[dayIndex - 1] ?? dated[0] ?? book.weather[0];
+  if (!picked || !picked.available) return "没有可用预报，仍按雨天改了户外项。";
+  const precip = picked.precipProbability == null ? "降水未知" : `降水 ${picked.precipProbability}%`;
+  return `预报 ${picked.condition}，${precip}。`;
+}
+
+export function planRain(book: Roadbook, now = new Date()): Plan {
+  const target = targetDayIndex(book, now);
+  const prefix = target.outOfRange ? "今天不在行程日期里，已按第 1 天试算。" : "";
+  const guide = guideFor(book.city);
+  const indoor = guide.places.filter((place) => place.indoor);
+  const used = new Set(book.items.map((item) => item.title));
+  const ops: PatchOp[] = [];
+  const lockedOutdoor: string[] = [];
+  for (const item of book.items) {
+    if (item.dayIndex !== target.dayIndex || item.status !== "待做") continue;
+    if (item.type !== "景点" || item.indoor) continue;
+    if (item.locked) {
+      lockedOutdoor.push(item.title);
+      continue;
+    }
+    const alt = indoor.find((place) => !used.has(place.name));
+    if (alt) {
+      used.add(alt.name);
+      ops.push({
+        op: "update",
+        id: item.id,
+        fields: {
+          title: alt.name,
+          place: `${book.city} · ${alt.area}`,
+          indoor: true,
+          durationMinutes: Math.min(item.durationMinutes, 120),
+          note: `下雨改室内。原来是「${item.title}」。${alt.detail}`,
+          source: { kind: "推断", note: "雨天规则" },
+        },
+      });
+      continue;
+    }
+    ops.push({
+      op: "update",
+      id: item.id,
+      fields: {
+        title: `${item.title}（改室内）`,
+        indoor: true,
+        durationMinutes: Math.min(item.durationMinutes, 90),
+        note: "没有现成的室内替身，这项改成室内停留，场馆请出发前核实。",
+        source: { kind: "推断", note: "雨天规则" },
+      },
+    });
+  }
+  if (ops.length === 0 && lockedOutdoor.length === 0) {
+    return { request: null, note: `${prefix}今天没有需要改的户外景点。`.trim() };
+  }
+  const forecast = weatherLine(book, target.dayIndex);
+  const kept = lockedOutdoor.length ? `锁定的户外仍保留：${lockedOutdoor.join("、")}。` : "";
+  const note = `${prefix}${forecast}${kept || "户外景点已改成室内。"}`.trim();
+  return {
+    request: {
+      label: "下雨了",
+      kind: "rain",
+      ops,
+      statusNote: note,
+      verifyAdds: lockedOutdoor.length
+        ? [`锁定的户外仍保留：${lockedOutdoor.join("、")}。下雨要不要去，自己定。`]
+        : [],
+    },
+    note,
+  };
+}
+
+let restSerial = 0;
+
+export function planTired(book: Roadbook, now = new Date(), random?: () => string): Plan {
+  const target = targetDayIndex(book, now);
+  const prefix = target.outOfRange ? "今天不在行程日期里，已按第 1 天试算。" : "";
+  const today = book.items.filter((item) => item.dayIndex === target.dayIndex && item.status === "待做" && !item.locked);
+  if (today.length === 0) return { request: null, note: `${prefix}今天没有能减的未完成项。`.trim() };
+  const ops: PatchOp[] = [];
+  const cut: string[] = [];
+  for (const item of today) {
+    const drop =
+      item.type === "自由" ||
+      (item.priority === "可砍" && item.type !== "餐" && item.type !== "交通") ||
+      item.type === "休息";
+    if (drop && item.priority !== "必去") {
+      ops.push({ op: "remove", id: item.id });
+      cut.push(item.title);
+      continue;
+    }
+    if (item.type === "景点") {
+      const durationMinutes = Math.min(item.durationMinutes, 75);
+      const travel = item.travelEstimateMinutes == null ? 15 : Math.min(item.travelEstimateMinutes, 15);
+      ops.push({
+        op: "update",
+        id: item.id,
+        fields: {
+          durationMinutes,
+          travelEstimateMinutes: travel,
+          note: item.note ? `${item.note} 累了，缩短停留、少走路。` : "累了，缩短停留、少走路。",
+        },
+      });
+    }
+  }
+  const anchor = today.find((item) => item.type === "景点" && item.priority === "必去" && !cut.includes(item.title));
+  const start = anchor ? parseTime(anchor.startTime) : 15 * 60;
+  const restStart = start == null ? "15:00" : formatTime(Math.min(start + 75, 16 * 60));
+  restSerial += 1;
+  const restId = `i_${random ? random() : `rest${restSerial}`}`;
+  ops.push({
+    op: "add",
+    item: {
+      id: restId,
+      dayIndex: target.dayIndex,
+      startTime: restStart,
+      durationMinutes: 40,
+      title: "坐下休息",
+      place: book.city === "未写明的目的地" ? "待定" : book.city,
+      lat: null,
+      lng: null,
+      type: "休息",
+      status: "待做",
+      source: { kind: "推断", note: "累了规则" },
+      travelEstimateMinutes: 5,
+      estimateSource: "推断",
+      locked: false,
+      priority: "想去" satisfies Priority,
+      indoor: true,
+      highlight: false,
+      note: "少走一段，在这里停 40 分钟。",
+    },
+  });
+  const projected = projectPatch(book, { label: "累了", kind: "tired", ops });
+  if (!projected.ok) return { request: null, note: projected.error };
+  const note = `${prefix}减了步行${cut.length ? `，砍了${cut.join("、")}` : ""}，加了休息。`.trim();
+  return {
+    request: { label: "累了", kind: "tired", ops, statusNote: note },
+    note,
+  };
+}

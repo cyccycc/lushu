@@ -1,0 +1,9 @@
+{
+  "id": "03-beijing-family",
+  "title": "北京亲子",
+  "brief": "一家三口（孩子 6 岁）国庆去北京四天，节奏别太赶，要有室内项目。",
+  "checks": {
+    "minDays": 4,
+    "keywords": ["北京", "室内"]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "id": "01-weekend-suzhou",
+  "title": "周末苏州",
+  "brief": "下周末两个人从上海去苏州，预算两千左右，想看园林也想吃本地菜。",
+  "checks": {
+    "minDays": 2,
+    "keywords": ["苏州", "园林"],
+    "budgetIncludes": "2000"
+  }
+}

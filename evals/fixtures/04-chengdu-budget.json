@@ -1,0 +1,10 @@
+{
+  "id": "04-chengdu-budget",
+  "title": "成都穷游",
+  "brief": "大学生穷游成都三天，总预算 800 元不含往返火车票，主吃小吃。",
+  "checks": {
+    "minDays": 3,
+    "keywords": ["成都", "小吃"],
+    "budgetIncludes": "800"
+  }
+}

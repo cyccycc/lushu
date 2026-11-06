@@ -1,0 +1,10 @@
+{
+  "id": "06-qingdao-rain",
+  "title": "青岛下雨",
+  "brief": "清明节去青岛三天，两个人，预报可能下雨，每天都要有室内备选。",
+  "checks": {
+    "minDays": 3,
+    "keywords": ["青岛", "室内"],
+    "requireRainPlan": true
+  }
+}

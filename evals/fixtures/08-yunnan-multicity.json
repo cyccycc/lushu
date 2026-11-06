@@ -1,0 +1,9 @@
+{
+  "id": "08-yunnan-multicity",
+  "title": "云南多城",
+  "brief": "云南八天，昆明、大理、丽江，两个人，不要太特种兵。",
+  "checks": {
+    "minDays": 8,
+    "keywords": ["昆明", "大理", "丽江"]
+  }
+}

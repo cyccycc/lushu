@@ -1,0 +1,9 @@
+{
+  "id": "10-xian-family-crowd",
+  "title": "西安春节",
+  "brief": "春节去西安五天，和父母一起，担心人多，希望早上出门、避开整点排队。",
+  "checks": {
+    "minDays": 5,
+    "keywords": ["西安", "早上"]
+  }
+}

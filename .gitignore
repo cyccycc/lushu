@@ -1,0 +1,21 @@
+node_modules/
+.pnpm-store/
+.next/
+out/
+dist/
+build/
+data/
+coverage/
+
+.env
+.env.local
+.env.*.local
+
+*.log
+.DS_Store
+*.tsbuildinfo
+.vercel
+*.pem
+
+# Next generates this on dev/build. The app-level ignore covers it too.
+apps/web/next-env.d.ts

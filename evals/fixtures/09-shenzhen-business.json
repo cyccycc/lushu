@@ -1,0 +1,9 @@
+{
+  "id": "09-shenzhen-business",
+  "title": "深圳出差",
+  "brief": "下周三到周五去深圳出差，一共三天。晚上和周五下午想顺便看看城市，一个人。",
+  "checks": {
+    "minDays": 3,
+    "keywords": ["深圳"]
+  }
+}

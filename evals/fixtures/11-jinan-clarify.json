@@ -1,0 +1,10 @@
+{
+  "id": "11-jinan-clarify",
+  "title": "济南高铁时刻未说明",
+  "brief": "周五2点高铁去济南",
+  "expect": "clarify",
+  "checks": {
+    "minDays": 1,
+    "keywords": ["济南"]
+  }
+}

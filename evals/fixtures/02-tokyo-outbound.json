@@ -1,0 +1,9 @@
+{
+  "id": "02-tokyo-outbound",
+  "title": "东京五天",
+  "brief": "五月想去东京五天，从上海出发，两个人，想看市区和一天迪士尼。",
+  "checks": {
+    "minDays": 5,
+    "keywords": ["东京", "迪士尼"]
+  }
+}
