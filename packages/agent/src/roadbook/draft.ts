@@ -1,7 +1,7 @@
 import { guideFor, hasCityGuide, type Place } from "../cities";
 import { citiesInText, cityByName } from "@lushu/tools/place";
 import { parseBrief, parseZhNumber } from "../parse";
-import { addDays, daysBetween, formatTime, inferStartDate, parseTime, shanghaiDate } from "./time";
+import { addDays, daysBetween, formatTime, inferStartDate, inferWeekdayDate, nextWeekMonday, parseTime, shanghaiDate, weekdayInWeek } from "./time";
 import type { Assumption, ItemType, Roadbook, RoadbookItem } from "./types";
 
 type ExtractInput = NonNullable<Roadbook["extract"]>;
@@ -492,6 +492,7 @@ export type DraftSpec = {
   interests: string[];
   pace: string | null;
   paceInferred: boolean;
+  whenInferred: boolean;
   slow: boolean;
   outbound: DraftLeg | null;
   inbound: DraftLeg | null;
@@ -522,6 +523,7 @@ function blankSpec(brief: string): DraftSpec {
     interests: [],
     pace: null,
     paceInferred: true,
+    whenInferred: true,
     slow: false,
     outbound: null,
     inbound: null,
@@ -606,12 +608,148 @@ function nearestClock(hits: { time: string; index: number }[], index: number, br
   return best.time;
 }
 
-function dateNear(brief: string, index: number, today: string): string | null {
-  const slice = brief.slice(Math.max(0, index - 14), index + 8);
+function dateNear(brief: string, index: number, today: string, now: Date): string | null {
+  const slice = brief.slice(Math.max(0, index - 16), Math.min(brief.length, index + 8));
   if (slice.includes("后天")) return addDays(today, 2);
   if (slice.includes("明天")) return addDays(today, 1);
   if (slice.includes("今天")) return today;
-  return null;
+  const weekHits = [...slice.matchAll(/(?:星期|礼拜|周)([一二三四五六日天])/g)];
+  const week = weekHits.length > 0 ? weekHits[weekHits.length - 1] : null;
+  if (!week?.[1]) return null;
+  if (/下周/.test(brief)) {
+    const monday = nextWeekMonday(now);
+    return weekdayInWeek(monday, week[1]);
+  }
+  const label = `周${week[1] === "天" ? "日" : week[1]}`;
+  return inferWeekdayDate(label, now);
+}
+
+function applySpokenDates(spec: DraftSpec, text: string, now: Date): void {
+  const today = shanghaiDate(now);
+  if (/当天回|当日回|当天往返|当日往返/.test(text)) {
+    spec.days = 1;
+    spec.daysAssumed = false;
+  } else if (/今天/.test(text) && /明天/.test(text) && /返程|回来|返回/.test(text)) {
+    spec.days = 2;
+    spec.daysAssumed = false;
+    spec.startDate = today;
+    spec.whenInferred = false;
+  }
+  const span = text.match(/下周([一二三四五六日天])\s*到\s*周([一二三四五六日天])/);
+  if (span?.[1] && span[2]) {
+    const monday = nextWeekMonday(now);
+    const start = weekdayInWeek(monday, span[1]);
+    const end = weekdayInWeek(monday, span[2]);
+    if (start && end && end >= start) {
+      spec.startDate = start;
+      spec.days = Math.min(7, daysBetween(start, end) + 1);
+      spec.daysAssumed = false;
+      spec.whenLabel = span[0];
+      spec.whenInferred = false;
+    }
+  } else if (/下周(?![一二三四五六日天末])/.test(text)) {
+    spec.startDate = nextWeekMonday(now);
+    spec.whenLabel = "下周";
+    spec.whenInferred = true;
+  }
+  if (!spec.startDate && /明天/.test(text) && /出发|去往|前往|高铁|飞机|当天|当日/.test(text)) {
+    spec.startDate = addDays(today, 1);
+    spec.whenInferred = false;
+  } else if (!spec.startDate && /今天/.test(text) && /出发|去往|高铁|飞机/.test(text)) {
+    spec.startDate = today;
+    spec.whenInferred = false;
+  }
+  if (!spec.startDate && !/下周/.test(text)) {
+    const week = text.match(/(?:星期|礼拜|周)([一二三四五六日天])/);
+    if (week?.[1]) {
+      const label = `周${week[1] === "天" ? "日" : week[1]}`;
+      const date = inferWeekdayDate(label, now);
+      if (date) {
+        spec.startDate = date;
+        spec.whenLabel = label;
+        spec.whenInferred = false;
+      }
+    }
+  }
+}
+
+function alignInboundMode(spec: DraftSpec): void {
+  if (spec.inbound && !spec.inbound.mode && spec.outbound?.mode) {
+    spec.inbound = { ...spec.inbound, mode: spec.outbound.mode };
+  }
+}
+
+const STATED_EVENTS: { title: string; re: RegExp }[] = [
+  { title: "体检", re: /体检/g },
+  { title: "开会", re: /开会|会议/g },
+  { title: "面试", re: /面试/g },
+];
+
+function applyBriefFacts(spec: DraftSpec, now: Date): void {
+  alignInboundMode(spec);
+  const text = spec.brief;
+  if (/酒店|宾馆/.test(text) && /订好|订了|已订|已经订/.test(text)) {
+    spec.lodging = { booked: true, area: spec.lodging?.area ?? spec.area };
+  }
+  const today = shanghaiDate(now);
+  const clocks = clocksIn(text);
+  const goAt = text.search(/高铁|动车|飞机|航班|出发|去往|前往/);
+  const backAt = text.search(/返程|返回|回来|当天回|当日往返/);
+  const blockers = [goAt, backAt].filter((index) => index >= 0);
+  for (const event of STATED_EVENTS) {
+    for (const match of text.matchAll(event.re)) {
+      if (match.index == null) continue;
+      const clock = nearestClock(clocks, match.index, text, blockers);
+      const date = dateNear(text, match.index, today, now) ?? spec.startDate;
+      const existing = spec.fixed.find((item) => item.title.includes(event.title) || event.title.includes(item.title));
+      if (!existing) {
+        spec.fixed.push({
+          date,
+          time: clock,
+          endTime: null,
+          title: event.title,
+          place: spec.area,
+          type: "办事",
+        });
+        continue;
+      }
+      if (!clock) existing.time = null;
+      else if (!existing.time) existing.time = clock;
+      if (date && !existing.date) existing.date = date;
+    }
+  }
+}
+
+function attachTransport(spec: DraftSpec, text: string, now: Date): void {
+  const today = shanghaiDate(now);
+  const origin = spec.origin;
+  const city = spec.city;
+  if (!origin || city === "未写明的目的地" || city === origin) return;
+  if (!/高铁|动车|飞机|航班|火车|自驾|开车|返程|返回|回来|当天回|当日往返/.test(text)) return;
+  const clocks = clocksIn(text);
+  const mode = modeOf(text);
+  const goAt = text.search(/高铁|动车|飞机|航班|出发|去往|前往/);
+  const backAt = text.search(/返程|返回|回来|当天回|当日往返/);
+  const goTime = goAt >= 0 ? nearestClock(clocks, goAt, text, [backAt]) : null;
+  const backTime = backAt >= 0 ? nearestClock(clocks, backAt, text, [goAt]) : null;
+  spec.outbound = {
+    date: (goAt >= 0 ? dateNear(text, goAt, today, now) : null) ?? spec.startDate,
+    time: goTime,
+    mode,
+    from: origin,
+    to: city,
+  };
+  if (backAt >= 0) {
+    spec.inbound = {
+      date:
+        dateNear(text, backAt, today, now) ??
+        (spec.days === 1 ? spec.outbound.date : spec.startDate ? addDays(spec.startDate, spec.days - 1) : null),
+      time: backTime,
+      mode,
+      from: city,
+      to: origin,
+    };
+  }
 }
 
 function modeOf(text: string): DraftLeg["mode"] {
@@ -649,7 +787,6 @@ export function specFromRules(brief: string, now = new Date()): DraftSpec {
     city = "未写明的目的地";
     origin = null;
   }
-  const today = shanghaiDate(now);
   spec.city = city;
   spec.origin = origin;
   spec.days = parsed.days;
@@ -657,72 +794,17 @@ export function specFromRules(brief: string, now = new Date()): DraftSpec {
   spec.partySummary = parsed.party.summary;
   spec.partyInferred = parsed.party.kind === "unknown";
   spec.whenLabel = parsed.whenLabel;
+  spec.whenInferred = !parsed.whenLabel;
   spec.slow = parsed.themes.includes("slow");
   spec.kind = kindOf(text);
   spec.area = extractArea(text);
   spec.landmark = citiesInText(text).find((hit) => hit.city === city)?.landmark ?? null;
   const named = city !== "未写明的目的地" && text.includes(city);
   spec.cityInferred = !named && city !== "未写明的目的地";
-  if (/当天回|当日回|当天往返|当日往返/.test(text)) {
-    spec.days = 1;
-    spec.daysAssumed = false;
-  } else if (/今天/.test(text) && /明天/.test(text) && /返程|回来|返回/.test(text)) {
-    spec.days = 2;
-    spec.daysAssumed = false;
-    spec.startDate = today;
-  }
-  if (!spec.startDate && /明天/.test(text) && /出发|去往|前往|高铁|飞机|当天|当日/.test(text)) {
-    spec.startDate = addDays(today, 1);
-  } else if (!spec.startDate && /今天/.test(text) && /出发|去往|高铁|飞机/.test(text)) {
-    spec.startDate = today;
-  }
-  if (spec.ask || !origin || city === "未写明的目的地" || city === origin) return spec;
-
-  const transport = /高铁|动车|飞机|航班|火车|自驾|开车|返程|返回|回来|当天回|当日往返/.test(text);
-  if (!transport) return spec;
-  const clocks = clocksIn(text);
-  const mode = modeOf(text);
-  const goAt = text.search(/高铁|动车|飞机|航班|出发|去往|前往/);
-  const backAt = text.search(/返程|返回|回来|当天回|当日往返/);
-  const goTime = goAt >= 0 ? nearestClock(clocks, goAt, text, [backAt]) : null;
-  const backTime = backAt >= 0 ? nearestClock(clocks, backAt, text, [goAt]) : null;
-  spec.outbound = {
-    date: (goAt >= 0 ? dateNear(text, goAt, today) : null) ?? spec.startDate,
-    time: goTime,
-    mode,
-    from: origin,
-    to: city,
-  };
-  if (backAt >= 0) {
-    spec.inbound = {
-      date: dateNear(text, backAt, today) ?? (spec.days === 1 ? spec.outbound.date : spec.startDate ? addDays(spec.startDate, spec.days - 1) : null),
-      time: backTime,
-      mode,
-      from: city,
-      to: origin,
-    };
-  }
-  const events: { title: string; re: RegExp }[] = [
-    { title: "体检", re: /体检/g },
-    { title: "开会", re: /开会|会议/g },
-    { title: "面试", re: /面试/g },
-  ];
-  for (const event of events) {
-    for (const match of text.matchAll(event.re)) {
-      if (match.index == null) continue;
-      spec.fixed.push({
-        date: dateNear(text, match.index, today) ?? spec.startDate,
-        time: nearestClock(clocks, match.index, text, [goAt, backAt]),
-        endTime: null,
-        title: event.title,
-        place: spec.area,
-        type: "办事",
-      });
-    }
-  }
-  if (/酒店|宾馆/.test(text) && /订好|订了|已订|已经订/.test(text)) {
-    spec.lodging = { booked: true, area: spec.area };
-  }
+  applySpokenDates(spec, text, now);
+  if (!spec.ask && origin && city !== "未写明的目的地" && city !== origin) attachTransport(spec, text, now);
+  if (spec.city === "未写明的目的地") spec.ask = spec.ask ?? "去哪座城市？";
+  applyBriefFacts(spec, now);
   return spec;
 }
 
@@ -734,8 +816,10 @@ export function specFromExtract(extract: ExtractInput, _now = new Date(), ask: s
   spec.area = extract.destination.area;
   spec.origin = extract.origin && extract.origin !== spec.city ? extract.origin : null;
   spec.ask = ask;
-  if (spec.ask && spec.origin === null && extract.origin && extract.origin === extract.destination.city) {
+  if (spec.ask) {
     spec.city = "未写明的目的地";
+    spec.origin = null;
+    spec.cityInferred = true;
   }
   const start = extract.startDate;
   const end = extract.endDate;
@@ -766,11 +850,23 @@ export function specFromExtract(extract: ExtractInput, _now = new Date(), ask: s
   spec.fixed = extract.fixed.map((item) => ({ ...item }));
   spec.lodging = extract.lodging ? { ...extract.lodging } : null;
   spec.cityInferred = false;
-  if (!extract.destination.city) {
+  if (!extract.destination.city || (spec.ask && spec.city === "未写明的目的地")) {
     spec.city = "未写明的目的地";
     spec.cityInferred = true;
     spec.ask = spec.ask ?? "去哪座城市？";
   }
+  spec.whenInferred = !spec.startDate && !spec.whenLabel;
+  if (!spec.ask) applyBriefFacts(spec, _now);
+  return spec;
+}
+
+export function specForQuestion(brief: string, ask: string): DraftSpec {
+  const spec = blankSpec(brief);
+  spec.via = "model";
+  spec.ask = ask;
+  spec.city = "未写明的目的地";
+  spec.cityInferred = true;
+  spec.whenInferred = true;
   return spec;
 }
 
@@ -858,9 +954,9 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
   const outboundMark: { day: number; end: number }[] = [];
   const inboundMark: { day: number; start: number }[] = [];
 
-  const pushLeg = (leg: DraftLeg, day: number, title: string, place: string) => {
+  const pushLeg = (leg: DraftLeg, day: number, title: string, place: string, statedTime = Boolean(leg.time)) => {
     if (selfTrip(title)) return;
-    const time = leg.time ?? (title.startsWith("返回") ? "18:00" : "08:00");
+    const time = leg.time ?? "08:00";
     const duration = clampDuration(time, modeMinutes(leg.mode));
     items.push(
       item(random, {
@@ -873,11 +969,13 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
         status: "待做",
         travelEstimateMinutes: modeMinutes(leg.mode),
         estimateSource: "推断",
-        locked: true,
+        locked: statedTime,
         priority: "必去",
         indoor: true,
-        note: "来自你的原话。时长是估计，班次和到达时间请自己查。路书不代订。",
-        source: statedSource(),
+        note: statedTime
+          ? "来自你的原话。时长是估计，班次和到达时间请自己查。路书不代订。"
+          : "时间推断。原话没写钟点，先放在这个时间。时长是估计，班次请自己查。路书不代订。",
+        source: statedTime ? statedSource() : inferredSource("时间推断"),
       }),
     );
     const startMin = parseTime(time) ?? DAY_START;
@@ -897,8 +995,9 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
     const to = spec.inbound.to ?? spec.origin;
     if (from && to && from !== to) {
       const day = dayIndexFor(spec.inbound.date ?? (spec.startDate ? addDays(spec.startDate, days - 1) : null), start, days);
+      const statedTime = Boolean(spec.inbound.time);
       const time = spec.inbound.time ?? "18:00";
-      pushLeg({ ...spec.inbound, time }, day, `从${from}前往${to}`, from);
+      pushLeg({ ...spec.inbound, time }, day, `从${from}前往${to}`, from, statedTime);
       const depart = parseTime(time);
       if (depart != null && depart - 60 >= DAY_START) {
         const buffer = depart - 60;
@@ -931,14 +1030,15 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
     const duration = fixed.type === "办事" ? 120 : 90;
     const depart = inboundMark.find((mark) => mark.day === day)?.start ?? DAY_LIMIT;
     const windowEnd = Math.min(DAY_LIMIT, depart);
-    const stated = fixed.time ? parseTime(fixed.time) : null;
+    const clockStated = Boolean(fixed.time);
+    const stated = clockStated && fixed.time ? parseTime(fixed.time) : null;
     const statedFits =
       stated != null && stated >= DAY_START && stated + 30 <= windowEnd && !overlaps(stated, Math.min(duration, windowEnd - stated), items, day);
     const startMin = statedFits
       ? stated
-      : placeFree(items, day, DAY_START, windowEnd, stated != null && stated < windowEnd ? stated : 9 * 60, Math.min(duration, 150));
+      : placeFree(items, day, DAY_START, windowEnd, stated != null && stated < windowEnd ? stated : 8 * 60, Math.min(duration, 150));
     if (startMin == null) continue;
-    const clockNote = statedFits ? "来自你的原话。" : "来自你的原话。钟点没写，先放在早上。";
+    const clockNote = clockStated ? "来自你的原话。" : "时间推断。钟点没写，先放在 08:00。";
     items.push(
       item(random, {
         dayIndex: day,
@@ -950,11 +1050,11 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
         status: "待做",
         travelEstimateMinutes: 15,
         estimateSource: "推断",
-        locked: true,
+        locked: clockStated,
         priority: "必去",
         indoor: true,
         note: clockNote,
-        source: statedSource(),
+        source: clockStated ? statedSource() : inferredSource("时间推断"),
       }),
     );
   }
@@ -1043,6 +1143,74 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
         priority: "想去",
         indoor: true,
       });
+      const second = claimSight(pool, used, spec.interests[0] ?? spec.landmark, false);
+      if (second && sights < 4 && latest - earliest >= 90) {
+        const interest = spec.interests.some((name) => second.name.includes(name) || name.includes(second.name));
+        if (
+          addAt(Math.max(earliest, 14 * 60), 100, {
+            dayIndex: day,
+            startTime: "14:00",
+            durationMinutes: 100,
+            title: second.name,
+            place: `${label} · ${second.area}`,
+            type: "景点",
+            status: "待做",
+            travelEstimateMinutes: 20,
+            locked: false,
+            priority: interest ? "必去" : sightPriority(second, spec.landmark),
+            indoor: second.indoor,
+            note: unknown ? "通用模板，地点是推断，不是别的城市的景点。" : second.detail,
+            source: inferredSource(unknown ? "通用模板，地点是推断" : "本地草稿"),
+          })
+        ) {
+          sights += 1;
+        }
+      }
+      if (!returning) {
+        addAt(16 * 60, 70, {
+          dayIndex: day,
+          startTime: "16:00",
+          durationMinutes: 70,
+          title: "可砍的闲逛",
+          place: mealPlace,
+          type: "自由",
+          status: "待做",
+          travelEstimateMinutes: 10,
+          locked: false,
+          priority: "可砍",
+          indoor: false,
+          note: "赶时间或累了就整段拿掉。",
+        });
+      }
+      addAt(18 * 60, 70, {
+        dayIndex: day,
+        startTime: "18:00",
+        durationMinutes: 70,
+        title: guide.food[2] ?? "晚饭",
+        place: mealPlace,
+        type: "餐",
+        status: "待做",
+        travelEstimateMinutes: 15,
+        locked: false,
+        priority: "想去",
+        indoor: true,
+      });
+      if (!returning) {
+        addAt(19 * 60 + 20, 90, {
+          dayIndex: day,
+          startTime: "19:20",
+          durationMinutes: 90,
+          title: "可砍的夜走",
+          place: mealPlace,
+          type: "自由",
+          status: "待做",
+          travelEstimateMinutes: 10,
+          locked: false,
+          priority: "可砍",
+          indoor: false,
+          note: "晚了就先砍这一段。",
+        });
+      }
     } else {
       if (earliest <= 13 * 60) {
         addAt(12 * 60, 50, {
@@ -1141,7 +1309,9 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
 }
 
 function verifyLines(spec: DraftSpec): string[] {
-  const lines = ["开放时间、闭馆日、要不要预约，出发前再核实", "用餐只是建议。路书不代订、不收款", "当天再看一眼天气"];
+  const lines: string[] = [];
+  if (spec.kind !== "办事") lines.push("开放时间、闭馆日、要不要预约，出发前再核实");
+  lines.push("用餐只是建议。路书不代订、不收款", "当天再看一眼天气");
   if (spec.outbound) lines.push("去程班次、到达时间自己查。路书不代订。");
   if (spec.fixed.some((item) => /体检/.test(item.title)) || /体检/.test(spec.brief)) {
     lines.push("体检是否需要空腹，出发前问清楚");
@@ -1166,12 +1336,11 @@ export function buildDraftFromSpec(spec: DraftSpec, options: DraftOptions): Road
     days: Math.min(7, Math.max(1, spec.days || 1)),
   };
   const items = (
-    useLegacy(ready) ? legacyItems(ready, random) : anchoredItems({ ...ready, startDate: resolvedStart }, random, now)
+    ready.ask ? [] : useLegacy(ready) ? legacyItems(ready, random) : anchoredItems({ ...ready, startDate: resolvedStart }, random, now)
   ).filter((entry) => !selfTrip(entry.title));
   const city = ready.city;
   const cityInferred = ready.cityInferred;
   const stated = (inferred: boolean) => (inferred ? undefined : "从你的原话读出");
-  const whenStated = Boolean(ready.startDate) || Boolean(ready.whenLabel);
   const assumptions: Assumption[] = [
     assumption(random, {
       key: "city",
@@ -1203,8 +1372,14 @@ export function buildDraftFromSpec(spec: DraftSpec, options: DraftOptions): Road
       key: "when",
       label: "时间",
       value: ready.whenLabel ?? ready.startDate ?? "日期未定",
-      inferred: !whenStated,
-      detail: whenStated && (ready.via === "model" || ready.startDate) ? "从你的原话读出" : undefined,
+      inferred: ready.whenInferred,
+      detail: ready.whenInferred
+        ? ready.whenLabel === "下周"
+          ? "下周从下周一开始，日期是推断"
+          : undefined
+        : ready.via === "model" || ready.startDate
+          ? "从你的原话读出"
+          : undefined,
     }),
     assumption(random, {
       key: "origin",
@@ -1225,11 +1400,13 @@ export function buildDraftFromSpec(spec: DraftSpec, options: DraftOptions): Road
   const question = ready.ask
     ? { id: "city", prompt: ready.ask }
     : city === "未写明的目的地"
-      ? { id: "city", prompt: "这次主要去哪座城市？" }
+      ? { id: "city", prompt: "去哪座城市？" }
       : null;
   const inferredLabels = assumptions.filter((item) => item.inferred).map((item) => item.label);
   const statusLine = question
-    ? "先出了骨架。只差一个城市，其余都标在假设上。"
+    ? items.length === 0
+      ? "先确认去哪座城市，再排行程。"
+      : "先出了骨架。只差一个城市，其余都标在假设上。"
     : inferredLabels.length > 0
       ? `草稿已出 · 推断了${inferredLabels.join("、")}`
       : "草稿已出";

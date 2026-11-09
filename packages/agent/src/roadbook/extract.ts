@@ -1,5 +1,5 @@
 import { chatComplete, type LlmEnv } from "@lushu/llm";
-import { matchTravelRoute, resolvePlaceToken } from "@lushu/tools/place";
+import { isVaguePlaceName, matchTravelRoute, resolvePlaceToken } from "@lushu/tools/place";
 import { extractJson } from "../json";
 import { addDays, daysBetween, shanghaiDate, shanghaiWeekday } from "./time";
 import type { ItemType } from "./types";
@@ -204,17 +204,27 @@ function dropLegDate(leg: Leg | null, today: string): Leg | null {
 
 function promptFor(now: Date): string {
   const today = shanghaiDate(now);
+  const tomorrow = addDays(today, 1);
   const weekday = shanghaiWeekday(now);
   return `你是「路书」的抽取器。只把用户原话抽成 JSON，不做规划。
-今天是 ${today} 周${weekday}（Asia/Shanghai）。「今天、明天、后天、周六、这周末、下周三」都换算成 YYYY-MM-DD。
+今天是 ${today} 周${weekday}（Asia/Shanghai）。「今天、明天、后天、周六、这周末、下周三」都换算成 YYYY-MM-DD。「下周」单独出现时从下周一开始。
 规则：
 - 只抽取用户明说的内容。没提到的字符串填 null，数组填 []。不要猜人数、预算、节奏，不要规划景点，不要编车次或航班号。
+- 用户提到要做的事都放进 fixed，不能只写进 missing 就丢掉。体检、开会、会议、面试都算。没写钟点时 time 填 null，这一项仍然要留着。早上、下午不是钟点。
+- 说了已订、订好了、已经订了，lodging.booked 就是 true。没提酒店就让 lodging 为 null。
+- 返程没写交通方式时，mode 沿用去程；去程也没写才填 null。
 - kind 只能是「旅游」「办事」「混合」。体检、开会、出差且没说要玩，用「办事」。又办事又玩，用「混合」。
-- destination.city 是目的地城市，不是出发地。area 是市内区域，例如汉峪金谷。
+- destination.city 是目的地城市，不是出发地。听不出城市（例如「暖和的地方」「哪里」）就填 null，并在 missing 里写目的地。area 是市内区域，例如汉峪金谷。
 - outbound 是去程，inbound 是返程。mode 只能是「高铁」「飞机」「自驾」「其他」或 null。
-- fixed 只放用户已经定好的事。type 只能是「交通」「景点」「餐」「休息」「自由」「办事」。
+- fixed.type 只能是「交通」「景点」「餐」「休息」「自由」「办事」。
 - 时间用 24 小时制 HH:mm。下午 2 点是 14:00，下午 4 点半是 16:30。
-- 只输出一个 JSON 对象，不要 Markdown。字段：kind, origin, destination, startDate, endDate, party, outbound, inbound, fixed, lodging, interests, pace, budget, missing。`;
+- 只输出一个 JSON 对象，不要 Markdown。字段：kind, origin, destination, startDate, endDate, party, outbound, inbound, fixed, lodging, interests, pace, budget, missing。
+
+示例（今天是 ${today}）：
+用户：我今天下午 2 点的高铁，从上海去往济南。明天早上体检，在汉峪金谷那边，我已经订好了附近的酒店。明天下午 4 点半返程
+要点：kind=办事，origin=上海，destination.city=济南，destination.area=汉峪金谷，startDate=${today}，endDate=${tomorrow}，outbound.time=14:00，outbound.mode=高铁，inbound.date=${tomorrow}，inbound.time=16:30，inbound.mode=高铁，fixed 必须有 {date:${tomorrow}, time:null, title:体检, place:汉峪金谷, type:办事}，lodging.booked=true。体检不能放进 missing。
+用户：下周三到周五去成都出差，周四下午 2 点开会
+要点：fixed 必须有周四 14:00 的开会，type=办事，不能漏。`;
 }
 
 /**
@@ -293,7 +303,7 @@ export function validateExtract(extract: TripExtract, now: Date, brief = ""): Va
     }
   }
 
-  if (!value.destination.city) return { ok: false, ask: ASK_CITY };
+  if (!value.destination.city || isVaguePlaceName(value.destination.city)) return { ok: false, ask: ASK_CITY };
 
   let ask: string | null = null;
   if (sameCity(value.origin, value.destination.city)) {
@@ -302,9 +312,9 @@ export function validateExtract(extract: TripExtract, now: Date, brief = ""): Va
     const route = matchTravelRoute(brief);
     if (route) {
       const stated = resolvePlaceToken(route.to);
-      if (stated && !sameCity(stated, value.destination.city)) return { ok: false, ask: ASK_CITY };
-      ask = ASK_CITY;
+      if (stated && !sameCity(stated, value.destination.city)) return { ok: false, ask: null };
     }
+    ask = ASK_CITY;
   }
 
   return { ok: true, value, ask };

@@ -236,11 +236,15 @@ function applyFields(item: RoadbookItem, fields: ItemFields): string | null {
   return null;
 }
 
+function isPinned(item: RoadbookItem): boolean {
+  return item.locked || item.title === "去车站";
+}
+
 function resolveDay(group: RoadbookItem[], touched: Set<string>): string | null {
   const placed: { start: number; end: number }[] = [];
   const ordered = [...group].sort((a, b) => (parseTime(a.startTime) ?? 0) - (parseTime(b.startTime) ?? 0));
-  const locked = ordered.filter((item) => item.locked);
-  const rest = ordered.filter((item) => !item.locked);
+  const locked = ordered.filter((item) => isPinned(item));
+  const rest = ordered.filter((item) => !isPinned(item));
   for (const item of locked) {
     const start = parseTime(item.startTime);
     if (start == null) return `「${item.title}」的时间无法解析。`;

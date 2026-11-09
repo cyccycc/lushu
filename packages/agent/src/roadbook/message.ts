@@ -2,7 +2,7 @@ import { citiesInText } from "@lushu/tools/place";
 import { buildDraft, itemsForDay, repeatRequested } from "./draft";
 import { parseZhNumber } from "../parse";
 import { projectPatch } from "./patch";
-import { inferStartDate, inferWeekdayDate, isUnsetWhen, parseTime } from "./time";
+import { formatTime, inferStartDate, inferWeekdayDate, isUnsetWhen, parseTime } from "./time";
 import type { PatchOp, Plan, Roadbook, RoadbookItem } from "./types";
 
 const REGEN_NOTICE = "未锁定的改动已重排。";
@@ -76,6 +76,115 @@ function tripOrigin(book: Roadbook): string | null {
   return value;
 }
 
+function intercityLegs(book: Roadbook): RoadbookItem[] {
+  return book.items
+    .filter((item) => item.type === "交通" && item.title.startsWith("从"))
+    .sort((a, b) => a.dayIndex - b.dayIndex || (parseTime(a.startTime) ?? 0) - (parseTime(b.startTime) ?? 0));
+}
+
+function returnLeg(book: Roadbook): RoadbookItem | undefined {
+  const legs = intercityLegs(book);
+  const station = book.items.find((item) => item.title === "去车站");
+  if (station) {
+    const stationStart = parseTime(station.startTime) ?? 0;
+    const paired = legs.find((item) => item.dayIndex === station.dayIndex && (parseTime(item.startTime) ?? 0) >= stationStart);
+    if (paired) return paired;
+  }
+  if (legs.length >= 2) return legs[legs.length - 1];
+  return legs.find((item) => /返回|返程/.test(`${item.title}${item.note ?? ""}`));
+}
+
+function stationItem(book: Roadbook, day?: number): RoadbookItem | undefined {
+  return book.items.find((item) => item.title === "去车站" && (day == null || item.dayIndex === day));
+}
+
+function bookKind(book: Roadbook): "旅游" | "办事" | "混合" {
+  if (book.extract?.kind === "办事" || book.extract?.kind === "混合") return book.extract.kind;
+  if (book.items.some((item) => item.type === "办事") || /体检|开会|会议|出差|面试|看病/.test(book.brief)) {
+    return book.items.some((item) => item.type === "景点") ? "混合" : "办事";
+  }
+  return "旅游";
+}
+
+function fillerItem(
+  id: string,
+  day: number,
+  city: string,
+  startTime: string,
+  durationMinutes: number,
+  title: string,
+  type: RoadbookItem["type"],
+): RoadbookItem {
+  return {
+    id,
+    dayIndex: day,
+    startTime,
+    durationMinutes,
+    title,
+    place: city === "未写明的目的地" ? "待定" : city,
+    lat: null,
+    lng: null,
+    type,
+    status: "待做",
+    source: { kind: "推断", note: "办事行程补位" },
+    travelEstimateMinutes: 10,
+    estimateSource: "推断",
+    locked: false,
+    priority: "想去",
+    indoor: true,
+    highlight: false,
+    note: "办事行程，不套用景点。",
+  };
+}
+
+function rebuildErrandDays(
+  book: Roadbook,
+  days: number,
+  random?: () => string,
+): { ops: PatchOp[]; droppedManual: boolean } {
+  const next = random ?? (() => Math.random().toString(36).slice(2, 8));
+  const manual = manuallyTouchedIds(book);
+  const added = userAddedIds(book);
+  const kind = bookKind(book);
+  const back = returnLeg(book);
+  const outbound = intercityLegs(book).find((item) => item.id !== back?.id);
+  const keep = new Map<string, number>();
+  const remember = (item: RoadbookItem, dayIndex: number) => {
+    keep.set(item.id, Math.min(days, Math.max(1, dayIndex)));
+  };
+  for (const item of book.items) {
+    if (outbound?.id === item.id || back?.id === item.id || item.title === "去车站") continue;
+    if (item.locked && item.dayIndex <= days) remember(item, item.dayIndex);
+    else if (item.type === "办事") remember(item, item.dayIndex <= days ? item.dayIndex : days);
+    else if ((item.type === "餐" || item.type === "休息") && item.dayIndex <= days) remember(item, item.dayIndex);
+    else if (kind === "混合" && item.type === "景点" && item.dayIndex <= days) remember(item, item.dayIndex);
+    else if (added.has(item.id) && item.type !== "景点" && item.dayIndex <= days) remember(item, item.dayIndex);
+  }
+  if (outbound) remember(outbound, Math.min(outbound.dayIndex, days));
+  if (back && !back.locked) remember(back, days);
+  const station = book.items.find((item) => item.title === "去车站");
+  if (station) remember(station, back && !back.locked ? days : Math.min(station.dayIndex, days));
+
+  const ops: PatchOp[] = [];
+  for (const item of book.items) {
+    if (!keep.has(item.id)) ops.push({ op: "remove", id: item.id });
+  }
+  for (const [id, dayIndex] of keep) {
+    const prev = book.items.find((item) => item.id === id);
+    if (prev && prev.dayIndex !== dayIndex) ops.push({ op: "update", id, fields: { dayIndex } });
+  }
+  for (let day = 1; day <= days; day += 1) {
+    const present = book.items.some((item) => keep.get(item.id) === day);
+    if (present) continue;
+    ops.push({ op: "add", item: fillerItem(`i_${next()}`, day, book.city, "12:00", 50, "附近吃饭", "餐") });
+    ops.push({ op: "add", item: fillerItem(`i_${next()}`, day, book.city, "18:00", 80, "回住处休息", "休息") });
+  }
+  return {
+    ops,
+    droppedManual: book.items.some((item) => !keep.has(item.id) && manual.has(item.id)),
+  };
+}
+
 function rebuildForDayCount(
   book: Roadbook,
   days: number,
@@ -87,6 +196,7 @@ function rebuildForDayCount(
   const addedCandidates = book.items.filter(
     (item) => added.has(item.id) && !item.locked && item.dayIndex >= 1 && item.dayIndex <= days,
   );
+  if (bookKind(book) !== "旅游") return rebuildErrandDays(book, days, random);
   const origin = tripOrigin(book);
   const landmark = citiesInText(book.brief).find((hit) => hit.city === book.city)?.landmark ?? null;
   const next = random ?? (() => Math.random().toString(36).slice(2, 8));
@@ -156,6 +266,31 @@ function rebuildForDayCount(
     ops: fallback.ops,
     droppedManual: fallback.removed.some((item) => manual.has(item.id)),
   };
+}
+
+function parseMoveClock(raw: string): string | null {
+  const text = raw.trim();
+  const colon = /^(\d{1,2})[:：](\d{2})$/.exec(text);
+  if (colon?.[1] && colon[2]) return clock(colon[1], colon[2]);
+  const half = /^(\d{1,2}|[零〇一二两俩三四五六七八九十]+)\s*点半$/.exec(text);
+  if (half?.[1]) {
+    const token = half[1] === "俩" ? "两" : half[1];
+    const hour = /^\d+$/.test(token) ? Number(token) : parseZhNumber(token);
+    if (hour == null) return null;
+    return clock(String(hour), "30");
+  }
+  const point = /^(\d{1,2}|[零〇一二两俩三四五六七八九十]+)\s*点(?:\s*(\d{1,2})\s*分?)?$/.exec(text);
+  if (!point?.[1]) return null;
+  const token = point[1] === "俩" ? "两" : point[1];
+  const hour = /^\d+$/.test(token) ? Number(token) : parseZhNumber(token);
+  if (hour == null) return null;
+  return clock(String(hour), point[2]);
+}
+
+function userMayRetimed(book: Roadbook, item: RoadbookItem): boolean {
+  if (!item.locked) return true;
+  if (item.type === "办事") return true;
+  return returnLeg(book)?.id === item.id;
 }
 
 function matchTripDays(raw: string): number | null | undefined {
@@ -253,18 +388,31 @@ export function planMessage(book: Roadbook, text: string, random?: () => string,
       note: `「${item.title}」标成已完成。`,
     };
   }
-  const move = raw.match(/^把\s*(.+?)\s*改到\s*(\d{1,2})(?:[:：](\d{2})|点(?:(\d{2})分?)?)?$/);
+  const move = raw.match(
+    /^把\s*(.+?)\s*改到\s*(\d{1,2}[:：]\d{2}|\d{1,2}\s*点半|[零〇一二两俩三四五六七八九十]+\s*点半|\d{1,2}\s*点(?:\s*\d{1,2}\s*分?)?|[零〇一二两俩三四五六七八九十]+\s*点(?:\s*\d{1,2}\s*分?)?)$/,
+  );
   if (move?.[1] && move[2]) {
-    const item = findItem(book, move[1]);
+    const item = /返程|回程/.test(move[1]) ? returnLeg(book) : findItem(book, move[1]);
     if (!item) return { request: null, note: "没有找到要改时间的项。" };
-    if (item.locked) return { request: null, note: `「${item.title}」已锁定，不能改。` };
-    const startTime = clock(move[2], move[3] ?? move[4]);
+    if (!userMayRetimed(book, item)) return { request: null, note: `「${item.title}」已锁定，不能改。` };
+    const startTime = parseMoveClock(move[2]);
     if (!startTime) return { request: null, note: "这个时间无法解析。" };
+    const ops: PatchOp[] = [];
+    if (item.locked) ops.push({ op: "update", id: item.id, fields: { locked: false } });
+    ops.push({ op: "update", id: item.id, fields: { startTime } });
+    if (item.locked) ops.push({ op: "update", id: item.id, fields: { locked: true } });
+    if (returnLeg(book)?.id === item.id) {
+      const startMin = parseTime(startTime);
+      const station = stationItem(book, item.dayIndex) ?? stationItem(book);
+      if (station && startMin != null && startMin >= 60) {
+        ops.push({ op: "update", id: station.id, fields: { startTime: formatTime(startMin - 60) } });
+      }
+    }
     return {
       request: {
         label: `${item.title}改到${startTime}`,
         kind: "user",
-        ops: [{ op: "update", id: item.id, fields: { startTime } }],
+        ops,
         statusNote: `「${item.title}」改到 ${startTime}。重叠的项会顺一下。`,
       },
       note: `「${item.title}」改到 ${startTime}。`,
@@ -320,6 +468,8 @@ export function planAssumptionEdit(
     if (days == null || days < 1 || days > 7) return { request: null, note: "天数请写成 1 到 7。" };
     const maxDay = book.items.reduce((max, item) => Math.max(max, item.dayIndex), 1);
     if (days !== maxDay) {
+      const back = returnLeg(book);
+      if (back?.locked) return { request: null, note: `返程已锁定在第 ${back.dayIndex} 天，要先改返程吗？` };
       const blocked = book.items.filter((item) => item.locked && item.dayIndex > days);
       if (blocked.length > 0) return { request: null, note: "多出来的日子里有锁定项，不能缩短。" };
       const rebuilt = rebuildForDayCount(book, days, random);
@@ -351,6 +501,12 @@ export function planAssumptionEdit(
     },
     note,
   };
+}
+
+export function summarizeChanges(changed: number, removed: number, days: string | undefined, dayRewrite: boolean): string {
+  const body = [changed > 0 ? `改了 ${changed} 项` : "", removed > 0 ? `拿掉 ${removed} 项` : ""].filter(Boolean).join("，");
+  if (dayRewrite && days) return `已按 ${days}重排：${body}`;
+  return body;
 }
 
 export function planAnswer(book: Roadbook, text: string, random?: () => string): Plan {

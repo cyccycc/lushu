@@ -81,6 +81,28 @@ export function isUnsetWhen(label: string | null | undefined): boolean {
   return /^(?:日期未定|时间未定|未定|待定|不确定|没定|还没定|tbd)$/i.test(text);
 }
 
+const WEEK_OFFSET: Record<string, number> = { 一: 0, 二: 1, 三: 2, 四: 3, 五: 4, 六: 5, 日: 6, 天: 6 };
+
+/** Monday of the next calendar week in Asia/Shanghai. Today being Monday still jumps seven days. */
+export function nextWeekMonday(now: Date): string {
+  const today = shanghaiDate(now);
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    weekday: "short",
+  }).format(now);
+  const index: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const day = index[weekday] ?? 0;
+  const sinceMonday = (day + 6) % 7;
+  return addDays(today, 7 - sinceMonday);
+}
+
+/** `name` is 一…日/天. `monday` is the Monday that opens that week. */
+export function weekdayInWeek(monday: string, name: string): string | null {
+  const offset = WEEK_OFFSET[name];
+  if (offset == null) return null;
+  return addDays(monday, offset);
+}
+
 export function inferWeekdayDate(label: string, now: Date): string | null {
   const week = label.match(/(?:星期|礼拜|周)([一二三四五六日天])/);
   if (!week?.[1]) {

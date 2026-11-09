@@ -1,6 +1,6 @@
-export { buildDraft, buildDraftFromSpec, itemsForDay, specFromExtract, specFromRules } from "./draft";
+export { buildDraft, buildDraftFromSpec, itemsForDay, specForQuestion, specFromExtract, specFromRules } from "./draft";
 export type { DraftFixed, DraftKind, DraftLeg, DraftSpec } from "./draft";
-export { planAnswer, planAssumptionEdit, planMessage } from "./message";
+export { planAnswer, planAssumptionEdit, planMessage, summarizeChanges } from "./message";
 export { applyPatch, endsAfterDay, normalizeItem, opsFromUnknown, projectPatch, replaceWeather, undoLast } from "./patch";
 export { planLate, planRain, planTired } from "./rearrange";
 export {

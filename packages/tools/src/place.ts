@@ -112,9 +112,22 @@ export type RouteHit = {
   to: string;
 };
 
+const RIDE_WORDS = /坐飞机|坐高铁|坐动车|坐火车|乘飞机|乘高铁|乘动车|乘火车|开车|自驾/g;
+
+/** A clipped destination that is a phrase, not a place. Known city names are kept. */
+export function isVaguePlaceName(raw: string): boolean {
+  const token = raw.trim();
+  if (!token) return true;
+  if (KNOWN_CITIES.some((city) => city.name === token)) return false;
+  return /个|的地方|哪里|哪儿|哪座|什么地方/.test(token);
+}
+
 /** 「从 A 去往 B」. B does not have to be in the city table. */
 export function matchTravelRoute(text: string): RouteHit | null {
-  const match = text.match(/从\s*([\u4e00-\u9fa5]{2,10}?)\s*(?:去往|前往|去|到|飞)\s*([\u4e00-\u9fa5]{2,8})/);
+  const cleaned = text.replace(RIDE_WORDS, "");
+  const match = cleaned.match(
+    /从\s*([\u4e00-\u9fa5]{2,10}?)\s*(?:去往|前往|飞往|飞到|去|到|飞)\s*([\u4e00-\u9fa5]{2,8})/,
+  );
   if (!match?.[1] || !match[2]) return null;
   return { from: match[1], to: match[2] };
 }
@@ -149,8 +162,10 @@ export function resolvePlaceToken(raw: string): string | null {
   if (!compact) return null;
   const prefixed = longestCityPrefix(compact);
   if (prefixed) return prefixed;
+  if (isVaguePlaceName(compact)) return null;
   const token = stripPlaceTail(compact);
   if (!token || token.length < 2) return null;
+  if (isVaguePlaceName(token)) return null;
   if (/^(看看|一下|哪儿|哪里|那里|这边|那边|这里|明天|后天|今天|周末|周边|附近|出发|返回|返程)$/.test(token)) {
     return null;
   }

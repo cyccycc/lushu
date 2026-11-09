@@ -1,4 +1,4 @@
-import { buildDraftFromSpec, forecastDaysThrough, normalizeWeatherQuery, replaceWeather, snapsFromReport, specFromExtract, specFromRules } from "@lushu/agent/roadbook";
+import { buildDraftFromSpec, forecastDaysThrough, normalizeWeatherQuery, replaceWeather, snapsFromReport, specForQuestion, specFromExtract, specFromRules } from "@lushu/agent/roadbook";
 import { extractBrief, validateExtract, type TripExtract } from "@lushu/agent/roadbook-server";
 import { getWeather, webSearch } from "@lushu/tools";
 import { gateOpen, passwordConfigured } from "@/lib/gate";
@@ -61,6 +61,9 @@ export async function POST(request: Request) {
       spec = specFromExtract(validated.value, now, validated.ask, brief);
       extracted = validated.value;
       via = "model";
+    } else if (validated?.ask) {
+      spec = specForQuestion(brief, validated.ask);
+      via = "model";
     }
   }
   if (!spec) spec = specFromRules(brief, now);
@@ -68,7 +71,14 @@ export async function POST(request: Request) {
   book = {
     ...book,
     extract: extracted,
-    statusLine: via === "model" ? MODEL_STATUS : parsedEnv.ok ? FALLBACK_STATUS : RULES_STATUS,
+    statusLine:
+      book.items.length === 0 && book.question
+        ? book.statusLine
+        : via === "model"
+          ? MODEL_STATUS
+          : parsedEnv.ok
+            ? FALLBACK_STATUS
+            : RULES_STATUS,
   };
   const days = book.items.reduce((max, item) => Math.max(max, item.dayIndex), 1);
   const searchText = spec.area ? `${book.city} ${spec.area} 开放时间` : `${book.city} 旅行 开放时间`;

@@ -42,14 +42,21 @@ function stillOpen(item: RoadbookItem, nowMinutes: number, useClock: boolean): b
   return end > nowMinutes;
 }
 
+function isStationRun(item: RoadbookItem): boolean {
+  return item.title === "去车站";
+}
+
 export function planLate(book: Roadbook, now = new Date()): Plan {
   const target = targetDayIndex(book, now);
   const nowMinutes = shanghaiMinutes(now);
+  const station = book.items.find((item) => item.dayIndex === target.dayIndex && isStationRun(item));
+  const cutoff = station ? parseTime(station.startTime) : null;
   const movable = book.items.filter(
     (item) =>
       item.dayIndex === target.dayIndex &&
       item.status === "待做" &&
       !item.locked &&
+      !isStationRun(item) &&
       stillOpen(item, nowMinutes, !target.outOfRange),
   );
   const prefix = target.outOfRange ? "今天不在行程日期里，已按第 1 天试算。" : "";
@@ -57,7 +64,7 @@ export function planLate(book: Roadbook, now = new Date()): Plan {
     return { request: null, note: `${prefix}没有能顺延的未完成项。`.trim() };
   }
   const removed = new Set<string>();
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
     const ops: PatchOp[] = [];
     for (const id of removed) ops.push({ op: "remove", id });
     let shifted = 0;
@@ -65,7 +72,7 @@ export function planLate(book: Roadbook, now = new Date()): Plan {
       if (removed.has(item.id)) continue;
       const start = parseTime(item.startTime);
       if (start == null) return { request: null, note: `「${item.title}」的时间无法解析。` };
-      if (start + 60 >= 24 * 60) {
+      if (start + 60 >= 24 * 60 || (cutoff != null && start + 60 >= cutoff)) {
         removed.add(item.id);
         continue;
       }
@@ -85,6 +92,28 @@ export function planLate(book: Roadbook, now = new Date()): Plan {
       if (!victim) return { request: null, note: projected.error };
       removed.add(victim.id);
       continue;
+    }
+    const spilled =
+      cutoff == null
+        ? []
+        : projected.items.filter((item) => {
+            if (item.dayIndex !== target.dayIndex || item.locked || isStationRun(item)) return false;
+            const start = parseTime(item.startTime);
+            return start != null && start >= cutoff;
+          });
+    if (spilled.length > 0) {
+      for (const item of spilled) removed.add(item.id);
+      continue;
+    }
+    const stationAfter = projected.items.find((item) => item.dayIndex === target.dayIndex && isStationRun(item));
+    if (station && stationAfter && stationAfter.startTime !== station.startTime) {
+      const pusher = projected.items.find(
+        (item) => item.dayIndex === target.dayIndex && !item.locked && !isStationRun(item) && removed.has(item.id) === false,
+      );
+      if (pusher) {
+        removed.add(pusher.id);
+        continue;
+      }
     }
     const late = overflowItem(projected.items, target.dayIndex);
     if (!late) {
@@ -132,6 +161,7 @@ export function planRain(book: Roadbook, now = new Date()): Plan {
   const asks: string[] = [];
   for (const item of book.items) {
     if (item.dayIndex !== target.dayIndex || item.status !== "待做") continue;
+    if (isStationRun(item)) continue;
     if (item.type !== "景点" || item.indoor) continue;
     if (item.locked) {
       lockedOutdoor.push(item.title);
@@ -213,7 +243,11 @@ export function planTired(book: Roadbook, now = new Date(), random?: () => strin
   const target = targetDayIndex(book, now);
   const prefix = target.outOfRange ? "今天不在行程日期里，已按第 1 天试算。" : "";
   const nowMinutes = shanghaiMinutes(now);
-  const today = book.items.filter((item) => item.dayIndex === target.dayIndex && item.status === "待做" && !item.locked);
+  const today = book.items.filter(
+    (item) => item.dayIndex === target.dayIndex && item.status === "待做" && !item.locked && !isStationRun(item),
+  );
+  const station = book.items.find((item) => item.dayIndex === target.dayIndex && isStationRun(item));
+  const stationStart = station ? parseTime(station.startTime) : null;
   if (today.length === 0) return { request: null, note: `${prefix}今天没有能减的未完成项。`.trim() };
   const ops: PatchOp[] = [];
   const cut: string[] = [];
@@ -249,8 +283,11 @@ export function planTired(book: Roadbook, now = new Date(), random?: () => strin
   const start = anchor ? parseTime(anchor.startTime) : 15 * 60;
   let restAt = start == null ? 15 * 60 : Math.min(start + 75, 16 * 60);
   if (!target.outOfRange && restAt <= nowMinutes) restAt = nowMinutes + 10;
-  if (restAt > 23 * 60) {
-    return { request: null, note: `${prefix}今天剩下的时间排不下休息。`.trim() };
+  if (stationStart != null && restAt + 40 > stationStart) restAt = stationStart - 40;
+  if (restAt > 23 * 60 || restAt < 8 * 60 || (stationStart != null && restAt + 40 > stationStart)) {
+    if (ops.length === 0) return { request: null, note: `${prefix}今天剩下的时间排不下休息。`.trim() };
+    const note = `${prefix}减了步行${cut.length ? `，砍了${cut.join("、")}` : ""}。去车站留在返程前。`.trim();
+    return { request: { label: "累了", kind: "tired", ops, statusNote: note }, note };
   }
   const restStart = formatTime(restAt);
   restSerial += 1;

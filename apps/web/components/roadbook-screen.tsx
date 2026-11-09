@@ -11,6 +11,7 @@ import {
   planLate,
   planMessage,
   snapForTripDay,
+  summarizeChanges,
   undoLast,
   type PatchRequest,
   type Roadbook,
@@ -52,11 +53,7 @@ function weatherText(book: Roadbook): string {
 }
 
 function changeSummary(changed: string[], removed: string[], days: string | undefined, dayRewrite: boolean): string {
-  const body = [changed.length > 0 ? `改了 ${changed.length} 项` : "", removed.length > 0 ? `拿掉 ${removed.length} 项` : ""]
-    .filter(Boolean)
-    .join("，");
-  if (dayRewrite && days) return `已按 ${days}重排：${body}`;
-  return body;
+  return summarizeChanges(changed.length, removed.length, days, dayRewrite);
 }
 
 function ChangeHint({
