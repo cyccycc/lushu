@@ -48,17 +48,20 @@ export function writePending(id: string, patches: PatchRequest[]): void {
   else localStorage.setItem(`lushu.pending.${id}`, JSON.stringify(patches));
 }
 
-export function bookHeaders(accessKey: string): Headers {
-  const headers = new Headers({
-    "Content-Type": "application/json",
-    "X-Lushu-Book-Key": accessKey,
-  });
+export function llmRequestHeaders(headers = new Headers()): Headers {
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const apiKey = localStorage.getItem("lushu.llmKey")?.trim();
   if (apiKey) headers.set("X-Lushu-LLM-Key", apiKey);
   const base = localStorage.getItem("lushu.llmBase")?.trim();
   const model = localStorage.getItem("lushu.llmModel")?.trim();
   if (base) headers.set("X-Lushu-LLM-Base", base);
   if (model) headers.set("X-Lushu-LLM-Model", model);
+  return headers;
+}
+
+export function bookHeaders(accessKey: string): Headers {
+  const headers = llmRequestHeaders();
+  headers.set("X-Lushu-Book-Key", accessKey);
   return headers;
 }
 

@@ -2,7 +2,7 @@ import { citiesInText } from "@lushu/tools/place";
 import { buildDraft, itemsForDay, repeatRequested } from "./draft";
 import { parseZhNumber } from "../parse";
 import { projectPatch } from "./patch";
-import { inferWeekdayDate, parseTime } from "./time";
+import { inferStartDate, inferWeekdayDate, isUnsetWhen, parseTime } from "./time";
 import type { PatchOp, Plan, Roadbook, RoadbookItem } from "./types";
 
 const REGEN_NOTICE = "未锁定的改动已重排。";
@@ -158,6 +158,36 @@ function rebuildForDayCount(
   };
 }
 
+function matchTripDays(raw: string): number | null | undefined {
+  const match =
+    /^(?:(?:把|将)?(?:天数|行程)?(?:改成|改为|换成|调整为|调整成|设为|设成)\s*)?(?:(只玩|就玩|要玩|玩)|(只|就))?\s*(\d+|[零〇一二两三四五六七八九十]+)\s*(天|日)(就行了?|就好了?|就可以了?|就够了|够了|即可)?$/.exec(
+      raw,
+    );
+  if (!match?.[3] || !match[4]) return undefined;
+  if (match[4] === "日" && !match[1] && !match[5]) return undefined;
+  const count = parseZhNumber(match[3]);
+  return count == null ? null : count;
+}
+
+function matchWeekdayLabel(raw: string): string | null {
+  const match =
+    /^(?:(?:把|将)?(?:时间|日期)?(?:改成|改为|换成|调整为|改到|设为|设成)\s*)?(?:周|星期|礼拜)([一二三四五六日天])(?:出发|去|走)?$/.exec(
+      raw,
+    );
+  if (!match?.[1]) return null;
+  return `周${match[1] === "天" ? "日" : match[1]}`;
+}
+
+function resolveWhenStart(value: string, now: Date): string | null {
+  const iso = /(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])/.exec(value);
+  if (iso?.[0]) return iso[0];
+  if (isUnsetWhen(value)) return inferStartDate(null, now);
+  const weekday = inferWeekdayDate(value, now);
+  if (weekday) return weekday;
+  if (/今天|今日|今晚|明天|明日|后天/.test(value)) return inferStartDate(value, now);
+  return null;
+}
+
 export function planMessage(book: Roadbook, text: string, random?: () => string, now = new Date()): Plan {
   const raw = text.trim().replace(/[。！？!?\s吧啊呀]+$/g, "");
   if (!raw) return { request: null, note: "先写一句要改的地方。" };
@@ -240,15 +270,12 @@ export function planMessage(book: Roadbook, text: string, random?: () => string,
       note: `「${item.title}」改到 ${startTime}。`,
     };
   }
-  const daysMention = raw.match(
-    /^(?:(?:把|将)?(?:天数)?(?:改成|改为|换成|调整为|调整成|设为|设成)\s*)?(\d+|[零〇一二两三四五六七八九十]+)\s*天$/,
-  );
-  if (daysMention?.[1]) {
+  const dayCount = matchTripDays(raw);
+  if (dayCount !== undefined) {
     const assumption = assumptionOf(book, "days");
     if (!assumption) return { request: null, note: "没有天数假设。" };
-    const count = parseZhNumber(daysMention[1]);
-    if (count == null) return { request: null, note: "天数请写成 1 到 7。" };
-    return planAssumptionEdit(book, assumption.id, `${count} 天`, random, now);
+    if (dayCount == null || dayCount < 1) return { request: null, note: "天数请写成 1 到 7。" };
+    return planAssumptionEdit(book, assumption.id, `${dayCount} 天`, random, now);
   }
   const partyMention = raw.match(
     /^(?:(?:把|将)?(?:人数)?(?:改成|改为|换成|调整为|调整成|设为|设成)\s*)?(\d+|[一二两俩三四五六七八九十]+)\s*个?人$/,
@@ -261,10 +288,11 @@ export function planMessage(book: Roadbook, text: string, random?: () => string,
     if (count == null || count < 1 || count > 20) return { request: null, note: "人数没有看懂。" };
     return planAssumptionEdit(book, assumption.id, partyValue(count), random, now);
   }
-  if (/^(?:(?:把|将)?(?:时间|日期)?(?:改成|改为|换成|调整为|改到|设为|设成)\s*)?(?:周六|星期六|礼拜六)(?:出发|去|走)?$/.test(raw)) {
+  const weekday = matchWeekdayLabel(raw);
+  if (weekday) {
     const assumption = assumptionOf(book, "when");
     if (!assumption) return { request: null, note: "没有时间假设。" };
-    return planAssumptionEdit(book, assumption.id, "周六", random, now);
+    return planAssumptionEdit(book, assumption.id, weekday, random, now);
   }
   return { request: null, note: "" };
 }
@@ -302,7 +330,7 @@ export function planAssumptionEdit(
   }
   let startDate: string | undefined;
   if (current.key === "when") {
-    startDate = inferWeekdayDate(value, now) ?? undefined;
+    startDate = resolveWhenStart(value, now) ?? undefined;
   }
   if (current.key === "city") {
     title = book.title.replace(/^[^·]+/, value);

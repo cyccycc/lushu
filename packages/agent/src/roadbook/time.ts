@@ -24,6 +24,17 @@ export function endMinutes(startTime: string, durationMinutes: number): number |
   return start + durationMinutes;
 }
 
+const WEEKDAY_ZH = ["日", "一", "二", "三", "四", "五", "六"];
+
+export function shanghaiWeekday(now: Date): string {
+  const short = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    weekday: "short",
+  }).format(now);
+  const index: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return WEEKDAY_ZH[index[short] ?? 0] ?? "一";
+}
+
 export function shanghaiDate(now: Date): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
@@ -63,8 +74,15 @@ export function shanghaiMinutes(now: Date): number {
 
 const WEEKDAY_INDEX: Record<string, number> = { 日: 0, 天: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6 };
 
+export function isUnsetWhen(label: string | null | undefined): boolean {
+  if (label == null) return true;
+  const text = label.trim();
+  if (!text) return true;
+  return /^(?:日期未定|时间未定|未定|待定|不确定|没定|还没定|tbd)$/i.test(text);
+}
+
 export function inferWeekdayDate(label: string, now: Date): string | null {
-  const week = label.match(/周([一二三四五六日天])/);
+  const week = label.match(/(?:星期|礼拜|周)([一二三四五六日天])/);
   if (!week?.[1]) {
     if (label.includes("周末")) return inferStartDate(label, now);
     return null;
@@ -93,7 +111,12 @@ export function forecastDaysThrough(startDate: string, tripDays: number, now = n
 
 export function inferStartDate(whenLabel: string | null, now: Date): string {
   const today = shanghaiDate(now);
-  if (!whenLabel || !whenLabel.includes("周末")) return today;
+  const label = whenLabel?.trim() ?? "";
+  if (!label || isUnsetWhen(label)) return addDays(today, 1);
+  if (/今天|今日|今晚|已经出发|已经在路上|已经到了|正在爬|人已经在/.test(label)) return today;
+  if (/后天/.test(label)) return addDays(today, 2);
+  if (/明天|明日/.test(label)) return addDays(today, 1);
+  if (!label.includes("周末")) return today;
   const weekday = new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Shanghai",
     weekday: "short",

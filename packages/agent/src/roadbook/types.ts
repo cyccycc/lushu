@@ -1,4 +1,4 @@
-export const ITEM_TYPES = ["交通", "景点", "餐", "休息", "自由"] as const;
+export const ITEM_TYPES = ["交通", "景点", "餐", "休息", "自由", "办事"] as const;
 export const ITEM_STATUSES = ["待做", "已完成", "已跳过"] as const;
 export const SOURCE_KINDS = ["实测", "检索", "推断"] as const;
 export const PRIORITIES = ["必去", "想去", "可砍"] as const;
@@ -143,6 +143,42 @@ export type Roadbook = {
   undo: UndoSnapshot | null;
   question: RoadbookQuestion | null;
   statusLine: string;
+  /** Validated model extract, kept for debugging. Raw model text is never stored. */
+  extract?: {
+    kind: "旅游" | "办事" | "混合";
+    origin: string | null;
+    destination: { city: string | null; area: string | null };
+    startDate: string | null;
+    endDate: string | null;
+    party: number | null;
+    outbound: {
+      date: string | null;
+      time: string | null;
+      mode: "高铁" | "飞机" | "自驾" | "其他" | null;
+      from: string | null;
+      to: string | null;
+    } | null;
+    inbound: {
+      date: string | null;
+      time: string | null;
+      mode: "高铁" | "飞机" | "自驾" | "其他" | null;
+      from: string | null;
+      to: string | null;
+    } | null;
+    fixed: {
+      date: string | null;
+      time: string | null;
+      endTime: string | null;
+      title: string;
+      place: string | null;
+      type: ItemType;
+    }[];
+    lodging: { booked: boolean; area: string | null } | null;
+    interests: string[];
+    pace: string | null;
+    budget: string | null;
+    missing: string[];
+  } | null;
 };
 
 export type PatchRequest = {

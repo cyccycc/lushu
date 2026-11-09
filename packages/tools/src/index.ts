@@ -1,5 +1,5 @@
-export { citiesInText, normalizeWeatherQuery } from "./place";
-export type { KnownCity, PlaceHit } from "./place";
+export { citiesInText, cityByName, matchTravelRoute, mentionedCities, normalizeWeatherQuery, resolvePlaceToken } from "./place";
+export type { KnownCity, PlaceHit, RouteHit } from "./place";
 export { getWeather } from "./weather";
 export { webSearch } from "./web-search";
 export type {

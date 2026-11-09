@@ -1,0 +1,105 @@
+{
+  "now": "2026-11-09T02:00:00.000Z",
+  "cases": [
+    {
+      "id": "taishan",
+      "brief": "想去爬泰山",
+      "extract": {
+        "kind": "旅游",
+        "origin": null,
+        "destination": { "city": "泰安", "area": null },
+        "startDate": null,
+        "endDate": null,
+        "party": null,
+        "outbound": null,
+        "inbound": null,
+        "fixed": [],
+        "lodging": null,
+        "interests": ["泰山"],
+        "pace": null,
+        "budget": null,
+        "missing": []
+      }
+    },
+    {
+      "id": "west-lake-weekend",
+      "brief": "这周末想去西湖走走，两个人",
+      "extract": {
+        "kind": "旅游",
+        "origin": null,
+        "destination": { "city": "杭州", "area": "西湖" },
+        "startDate": "2026-11-14",
+        "endDate": "2026-11-15",
+        "party": 2,
+        "outbound": null,
+        "inbound": null,
+        "fixed": [],
+        "lodging": null,
+        "interests": ["西湖"],
+        "pace": null,
+        "budget": null,
+        "missing": []
+      }
+    },
+    {
+      "id": "chengdu-meeting",
+      "brief": "下周三到周五去成都出差，周四下午 2 点开会",
+      "extract": {
+        "kind": "办事",
+        "origin": null,
+        "destination": { "city": "成都", "area": null },
+        "startDate": "2026-11-18",
+        "endDate": "2026-11-20",
+        "party": 1,
+        "outbound": null,
+        "inbound": null,
+        "fixed": [{ "date": "2026-11-19", "time": "14:00", "endTime": null, "title": "开会", "place": "成都", "type": "办事" }],
+        "lodging": null,
+        "interests": [],
+        "pace": null,
+        "budget": null,
+        "missing": []
+      }
+    },
+    {
+      "id": "suzhou-day",
+      "brief": "明天早上 8 点从上海出发去苏州，当天回",
+      "extract": {
+        "kind": "旅游",
+        "origin": "上海",
+        "destination": { "city": "苏州", "area": null },
+        "startDate": "2026-11-10",
+        "endDate": "2026-11-10",
+        "party": 1,
+        "outbound": { "date": "2026-11-10", "time": "08:00", "mode": "高铁", "from": "上海", "to": "苏州" },
+        "inbound": { "date": "2026-11-10", "time": "18:00", "mode": "高铁", "from": "苏州", "to": "上海" },
+        "fixed": [],
+        "lodging": null,
+        "interests": [],
+        "pace": null,
+        "budget": null,
+        "missing": []
+      }
+    },
+    {
+      "id": "shanghai-around",
+      "brief": "从上海出发，就在上海周边玩",
+      "extract": {
+        "kind": "旅游",
+        "origin": "上海",
+        "destination": { "city": "上海", "area": null },
+        "startDate": "2026-11-09",
+        "endDate": "2026-11-09",
+        "party": null,
+        "outbound": { "date": "2026-11-09", "time": "09:00", "mode": "其他", "from": "上海", "to": "上海" },
+        "inbound": null,
+        "fixed": [],
+        "lodging": null,
+        "interests": [],
+        "pace": null,
+        "budget": null,
+        "missing": ["目的地"]
+      }
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-import { citiesInText } from "@lushu/tools/place";
+import { citiesInText, longestCityPrefix, matchTravelRoute, mentionedCities, resolvePlaceToken } from "@lushu/tools/place";
 import { CITIES } from "./cities";
 import type { Party, PartyKind, Theme, TripSpec } from "./types";
 
@@ -110,6 +110,8 @@ function extractDays(brief: string): { days: number; assumed: boolean } {
 
 function extractWhen(brief: string): string | null {
   const rules = [
+    /今天|今日|今晚/,
+    /已经出发|已经在路上|已经到了|正在爬|人已经在/,
     /下周末|这个周末|周末/,
     /春节/,
     /国庆/,
@@ -118,6 +120,8 @@ function extractWhen(brief: string): string | null {
     /端午/,
     /元旦/,
     /下周三\s*到\s*周五|下周[一二三四五六日天]/,
+    /后天/,
+    /明天|明日/,
     /(五月|六月|七月|八月|九月|十月|十一月|十二月|一月|二月|三月|四月|春天|夏天|秋天|冬天)/,
   ];
   for (const rule of rules) {
@@ -130,15 +134,21 @@ function extractWhen(brief: string): string | null {
 function extractOrigin(brief: string): string | null {
   const match = brief.match(/从\s*([\u4e00-\u9fa5]{2,8}?)\s*(?:出发|前往|去|到|往)/);
   if (!match?.[1]) return null;
-  const known = CITIES.find((city) => match[1].startsWith(city.name));
-  return known?.name ?? match[1];
+  const known = longestCityPrefix(match[1]);
+  if (known) return known;
+  const token = match[1].replace(/(出发|前往|去往)$/u, "");
+  return token || null;
 }
 
 function extractDestinations(brief: string, origin: string | null): string[] {
+  const route = matchTravelRoute(brief);
+  if (route) {
+    const dest = resolvePlaceToken(route.to);
+    if (dest) return [dest];
+  }
   const found: { index: number; name: string }[] = [];
-  for (const city of CITIES) {
-    const index = brief.indexOf(city.name);
-    if (index >= 0) found.push({ index, name: city.name });
+  for (const city of mentionedCities(brief)) {
+    found.push({ index: city.index, name: city.name });
   }
   for (const hit of citiesInText(brief)) {
     if (!found.some((item) => item.name === hit.city)) {
@@ -146,16 +156,14 @@ function extractDestinations(brief: string, origin: string | null): string[] {
     }
   }
   found.sort((a, b) => a.index - b.index);
-  let names = found.map((item) => item.name);
+  let names = [...new Set(found.map((item) => item.name))];
   if (origin && names.includes(origin) && names.length > 1) {
     names = names.filter((name) => name !== origin);
   }
   if (names.length === 0) {
-    const going = brief.match(/去\s*([\u4e00-\u9fa5]{2,6})/);
-    const token = going?.[1]?.replace(/(玩|旅游|旅行|逛逛)$/, "") ?? "";
-    if (token && !/^(看看|一下|哪儿|哪里|那里|这边|那边|这里|明天|后天|今天|周末)$/.test(token)) {
-      return [token];
-    }
+    const going = brief.match(/去\s*([\u4e00-\u9fa5]{2,8})/);
+    const token = going?.[1] ? resolvePlaceToken(going[1]) : null;
+    if (token && token !== origin) return [token];
     return origin ? [origin] : ["未写明的目的地"];
   }
   return names;

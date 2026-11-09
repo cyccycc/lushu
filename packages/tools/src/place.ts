@@ -69,7 +69,114 @@ export const KNOWN_CITIES: KnownCity[] = [
   { name: "扬州", english: "Yangzhou" },
   { name: "乐山", english: "Leshan" },
   { name: "张家界", english: "Zhangjiajie" },
+  { name: "天津", english: "Tianjin" },
+  { name: "沈阳", english: "Shenyang" },
+  { name: "大连", english: "Dalian" },
+  { name: "长春", english: "Changchun" },
+  { name: "哈尔滨", english: "Harbin" },
+  { name: "石家庄", english: "Shijiazhuang" },
+  { name: "太原", english: "Taiyuan" },
+  { name: "呼和浩特", english: "Hohhot" },
+  { name: "合肥", english: "Hefei" },
+  { name: "福州", english: "Fuzhou" },
+  { name: "南昌", english: "Nanchang" },
+  { name: "郑州", english: "Zhengzhou" },
+  { name: "长沙", english: "Changsha" },
+  { name: "南宁", english: "Nanning" },
+  { name: "海口", english: "Haikou" },
+  { name: "贵阳", english: "Guiyang" },
+  { name: "兰州", english: "Lanzhou" },
+  { name: "西宁", english: "Xining" },
+  { name: "银川", english: "Yinchuan" },
+  { name: "乌鲁木齐", english: "Urumqi" },
+  { name: "拉萨", english: "Lhasa" },
+  { name: "香港", english: "Hong Kong" },
+  { name: "澳门", english: "Macau" },
+  { name: "台北", english: "Taipei" },
+  { name: "宁波", english: "Ningbo" },
+  { name: "无锡", english: "Wuxi" },
+  { name: "珠海", english: "Zhuhai" },
+  { name: "洛阳", english: "Luoyang" },
+  { name: "敦煌", english: "Dunhuang" },
+  { name: "嘉兴", english: "Jiaxing" },
+  { name: "舟山", english: "Zhoushan" },
+  { name: "九江", english: "Jiujiang" },
+  { name: "渭南", english: "Weinan" },
+  { name: "阿坝", english: "Aba" },
 ];
+
+const CITIES_BY_LENGTH = [...KNOWN_CITIES].sort((a, b) => b.name.length - a.name.length);
+
+export type RouteHit = {
+  from: string;
+  to: string;
+};
+
+/** 「从 A 去往 B」. B does not have to be in the city table. */
+export function matchTravelRoute(text: string): RouteHit | null {
+  const match = text.match(/从\s*([\u4e00-\u9fa5]{2,10}?)\s*(?:去往|前往|去|到|飞)\s*([\u4e00-\u9fa5]{2,8})/);
+  if (!match?.[1] || !match[2]) return null;
+  return { from: match[1], to: match[2] };
+}
+
+export function cityByName(name: string): KnownCity | null {
+  return KNOWN_CITIES.find((city) => city.name === name) ?? null;
+}
+
+export function longestCityPrefix(token: string): string | null {
+  const found = CITIES_BY_LENGTH.find((city) => token.startsWith(city.name));
+  return found?.name ?? null;
+}
+
+const PLACE_TAIL = /(?:玩玩|逛逛|走走|旅游|旅行|两天|三天|四天|五天|一天|几天|周末|周边|附近|那边|这里|一下|玩|逛|市)$/;
+
+function stripPlaceTail(token: string): string {
+  let next = token;
+  for (let i = 0; i < 4; i += 1) {
+    const stripped = next.replace(PLACE_TAIL, "");
+    if (stripped === next) break;
+    next = stripped;
+  }
+  return next;
+}
+
+/**
+ * Turn a short phrase into a city name.
+ * Known cities and landmarks win. Anything else is kept as written, so 济南 does not have to be templated.
+ */
+export function resolvePlaceToken(raw: string): string | null {
+  const compact = raw.trim().replace(/\s+/g, "");
+  if (!compact) return null;
+  const prefixed = longestCityPrefix(compact);
+  if (prefixed) return prefixed;
+  const token = stripPlaceTail(compact);
+  if (!token || token.length < 2) return null;
+  if (/^(看看|一下|哪儿|哪里|那里|这边|那边|这里|明天|后天|今天|周末|周边|附近|出发|返回|返程)$/.test(token)) {
+    return null;
+  }
+  const known = longestCityPrefix(token);
+  if (known) return known;
+  const landmark = citiesInText(token)[0];
+  if (landmark) return landmark.city;
+  return token.slice(0, 12);
+}
+
+export function mentionedCities(text: string): { name: string; english: string; index: number }[] {
+  const hits: { name: string; english: string; index: number; end: number }[] = [];
+  for (const city of CITIES_BY_LENGTH) {
+    let from = 0;
+    while (from < text.length) {
+      const index = text.indexOf(city.name, from);
+      if (index < 0) break;
+      const end = index + city.name.length;
+      const overlaps = hits.some((hit) => index < hit.end && end > hit.index);
+      if (!overlaps) hits.push({ name: city.name, english: city.english, index, end });
+      from = end;
+    }
+  }
+  hits.sort((a, b) => a.index - b.index);
+  return hits.map(({ name, english, index }) => ({ name, english, index }));
+}
 
 export function citiesInText(text: string): PlaceHit[] {
   const hits: PlaceHit[] = [];
@@ -116,6 +223,15 @@ export function normalizeWeatherQuery(
 ): { query: string; alternateName?: string } {
   const text = raw.trim();
   if (!text) return { query: "", alternateName };
+
+  const route = matchTravelRoute(text);
+  if (route) {
+    const city = resolvePlaceToken(route.to);
+    if (city) {
+      const known = cityByName(city);
+      return { query: city, alternateName: alternateName || known?.english };
+    }
+  }
 
   const going = cityAfterGoing(text);
   if (going) return { query: going.name, alternateName: alternateName || going.english };

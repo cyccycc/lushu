@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import { KeySettings } from "@/components/key-settings";
-import { readRecent, rememberBook, type RecentBook } from "@/lib/browser-book";
+import { llmRequestHeaders, readRecent, rememberBook, type RecentBook } from "@/lib/browser-book";
 
 type Listed = RecentBook & { brief?: string };
 
@@ -80,10 +80,10 @@ export function HomeScreen() {
   async function create(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
-    setNote("正在写草稿…");
+    setNote("正在读你的这句话…");
     const res = await fetch("/api/roadbooks", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: llmRequestHeaders(),
       body: JSON.stringify({ brief }),
     });
     const data = (await res.json().catch(() => null)) as { error?: string; book?: { id: string; title: string; updatedAt: string }; accessKey?: string } | null;
@@ -137,7 +137,7 @@ export function HomeScreen() {
             placeholder="这周末想去西湖走走，两个人"
           />
           <button type="submit" disabled={busy} className="w-full rounded-xl bg-primary py-3 text-sm text-primary-foreground">
-            {busy ? "正在写草稿…" : "生成草稿"}
+            {busy ? "正在读你的这句话…" : "生成草稿"}
           </button>
         </form>
       )}

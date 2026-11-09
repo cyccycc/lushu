@@ -1,0 +1,21 @@
+{
+  "id": "extract-jinan",
+  "now": "2026-11-06T02:00:00.000Z",
+  "brief": "我今天下午 2 点的高铁，从上海去往济南。明天早上体检，在汉峪金谷那边，我已经订好了附近的酒店。明天下午 4 点半返程",
+  "extract": {
+    "kind": "办事",
+    "origin": "上海",
+    "destination": { "city": "济南", "area": "汉峪金谷" },
+    "startDate": "2026-11-06",
+    "endDate": "2026-11-07",
+    "party": 1,
+    "outbound": { "date": "2026-11-06", "time": "14:00", "mode": "高铁", "from": "上海", "to": "济南" },
+    "inbound": { "date": "2026-11-07", "time": "16:30", "mode": "高铁", "from": "济南", "to": "上海" },
+    "fixed": [{ "date": "2026-11-07", "time": null, "endTime": null, "title": "体检", "place": "汉峪金谷", "type": "办事" }],
+    "lodging": { "booked": true, "area": "汉峪金谷" },
+    "interests": [],
+    "pace": null,
+    "budget": null,
+    "missing": []
+  }
+}

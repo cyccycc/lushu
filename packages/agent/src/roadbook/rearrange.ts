@@ -5,7 +5,7 @@ import { snapForTripDay } from "./weather";
 import type { PatchOp, Plan, Priority, Roadbook, RoadbookItem } from "./types";
 
 function cutRank(item: RoadbookItem): number {
-  if (item.locked || item.status !== "待做" || item.priority === "必去") return 1000;
+  if (item.type === "办事" || item.locked || item.status !== "待做" || item.priority === "必去") return 1000;
   if (item.type === "交通") return 80;
   if (item.type === "餐") return 70;
   if (item.type === "景点" && item.priority === "想去") return 50;
@@ -198,6 +198,17 @@ export function planRain(book: Roadbook, now = new Date()): Plan {
 
 let restSerial = 0;
 
+const CLIMB_RE = /泰山|黄山|华山|衡山|恒山|嵩山|峨眉|庐山|普陀山|青城山|武当山|雁荡山|长白山|五台山|登山|爬山|徒步|登顶/;
+
+function keepsLongVisit(item: RoadbookItem): boolean {
+  if (item.type !== "景点" || item.indoor) return false;
+  if (item.durationMinutes >= 300) return true;
+  if (item.durationMinutes < 180) return false;
+  const text = `${item.title}${item.place}${item.note ?? ""}`;
+  if (CLIMB_RE.test(text)) return true;
+  return item.priority === "必去";
+}
+
 export function planTired(book: Roadbook, now = new Date(), random?: () => string): Plan {
   const target = targetDayIndex(book, now);
   const prefix = target.outOfRange ? "今天不在行程日期里，已按第 1 天试算。" : "";
@@ -217,7 +228,11 @@ export function planTired(book: Roadbook, now = new Date(), random?: () => strin
       continue;
     }
     if (item.type === "景点") {
+      if (keepsLongVisit(item)) continue;
+      const start = parseTime(item.startTime);
       const durationMinutes = Math.min(item.durationMinutes, 75);
+      const useClock = !target.outOfRange;
+      if (useClock && start != null && start <= nowMinutes && start + durationMinutes < nowMinutes) continue;
       const travel = item.travelEstimateMinutes == null ? 15 : Math.min(item.travelEstimateMinutes, 15);
       ops.push({
         op: "update",

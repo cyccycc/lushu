@@ -51,6 +51,54 @@ function weatherText(book: Roadbook): string {
   return lines.join(" · ");
 }
 
+function changeSummary(changed: string[], removed: string[], days: string | undefined, dayRewrite: boolean): string {
+  const body = [changed.length > 0 ? `改了 ${changed.length} 项` : "", removed.length > 0 ? `拿掉 ${removed.length} 项` : ""]
+    .filter(Boolean)
+    .join("，");
+  if (dayRewrite && days) return `已按 ${days}重排：${body}`;
+  return body;
+}
+
+function ChangeHint({
+  highlighted,
+  dropped,
+  days,
+  dayRewrite,
+  open,
+  onToggle,
+}: {
+  highlighted: string[];
+  dropped: string[];
+  days: string | undefined;
+  dayRewrite: boolean;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const detail = [
+    highlighted.length > 0 ? `刚改：${highlighted.join("、")}` : "",
+    dropped.length > 0 ? `刚拿掉：${dropped.join("、")}` : "",
+  ]
+    .filter(Boolean)
+    .join("。");
+  const collapsed = highlighted.length + dropped.length > 5;
+  if (!collapsed) {
+    return (
+      <p data-changed="1" className="rounded-xl border border-amber-300 bg-amber-100/80 px-3 py-2 text-xs leading-5 text-amber-950">
+        {detail}
+      </p>
+    );
+  }
+  return (
+    <div data-changed="1" className="rounded-xl border border-amber-300 bg-amber-100/80 px-3 py-2 text-xs leading-5 text-amber-950">
+      <button type="button" className="text-left" aria-expanded={open} onClick={onToggle}>
+        {changeSummary(highlighted, dropped, days, dayRewrite)}
+        <span className="ml-2 underline">{open ? "收起" : "展开"}</span>
+      </button>
+      {open ? <p className="mt-1">{detail}</p> : null}
+    </div>
+  );
+}
+
 export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: string }) {
   const [book, setBook] = useState<Roadbook | null>(null);
   const [loading, setLoading] = useState(true);
@@ -64,6 +112,7 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
   const [copied, setCopied] = useState(false);
   const [hasKey, setHasKey] = useState(false);
   const [composerError, setComposerError] = useState("");
+  const [changesOpen, setChangesOpen] = useState(false);
   const bookRef = useRef<Roadbook | null>(null);
   const editingRef = useRef<string | null>(null);
   const bookPane = useRef<HTMLDivElement>(null);
@@ -542,11 +591,14 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
 
       <div ref={bookPane} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 pb-4">
         {highlighted.length > 0 || dropped.length > 0 ? (
-          <p data-changed="1" className="rounded-xl border border-amber-300 bg-amber-100/80 px-3 py-2 text-xs leading-5 text-amber-950">
-            {highlighted.length > 0 ? `刚改：${highlighted.map((item) => item.title).join("、")}` : ""}
-            {highlighted.length > 0 && dropped.length > 0 ? "。" : ""}
-            {dropped.length > 0 ? `刚拿掉：${dropped.map((item) => item.title).join("、")}` : ""}
-          </p>
+          <ChangeHint
+            highlighted={highlighted.map((item) => item.title)}
+            dropped={dropped.map((item) => item.title)}
+            days={book.assumptions.find((item) => item.key === "days")?.value}
+            dayRewrite={book.patchHistory.at(-1)?.kind === "assumption" && /天/.test(book.patchHistory.at(-1)?.label ?? "")}
+            open={changesOpen}
+            onToggle={() => setChangesOpen((value) => !value)}
+          />
         ) : null}
         {days.map((day) => {
           const daySnap = snapForTripDay(book, day);

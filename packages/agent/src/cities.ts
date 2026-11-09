@@ -364,6 +364,10 @@ export const CITIES: CityGuide[] = [
   },
 ];
 
+export function hasCityGuide(name: string): boolean {
+  return CITIES.some((city) => city.name === name);
+}
+
 export function guideFor(name: string): CityGuide {
   const found = CITIES.find((city) => city.name === name);
   if (found) return found;
