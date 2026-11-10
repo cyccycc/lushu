@@ -1,4 +1,4 @@
-import { DAY_END_MINUTES, formatTime, parseTime } from "./time";
+import { DAY_END_MINUTES, formatTime, noteForPlacedClock, parseTime } from "./time";
 import {
   ITEM_STATUSES,
   ITEM_TYPES,
@@ -163,9 +163,7 @@ function lockedUpdateError(item: RoadbookItem, fields: ItemFields): string | nul
 }
 
 function rewritePlacedNote(note: string | undefined, startTime: string): string | undefined {
-  if (!note) return note;
-  const next = note.replace(/先放在\s*\d{2}:\d{2}/g, `先放在 ${startTime}`);
-  return next === note ? note : next;
+  return noteForPlacedClock(note, startTime);
 }
 
 function applyFields(item: RoadbookItem, fields: ItemFields): string | null {

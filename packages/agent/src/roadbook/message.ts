@@ -1,5 +1,5 @@
 import { citiesInText } from "@lushu/tools/place";
-import { buildDraft, itemsForDay, repeatRequested, wantsInferredReturn } from "./draft";
+import { buildDraft, itemsForDay, repeatRequested, returnAssumptionValue, wantsInferredReturn } from "./draft";
 import { parseZhNumber } from "../parse";
 import { projectPatch } from "./patch";
 import { formatTime, inferStartDate, inferWeekdayDate, isUnsetWhen, parseTime } from "./time";
@@ -202,14 +202,16 @@ function rebuildForDayCount(
   const origin = tripOrigin(book);
   const landmark = citiesInText(book.brief).find((hit) => hit.city === book.city)?.landmark ?? null;
   const next = random ?? (() => Math.random().toString(36).slice(2, 8));
+  const keptSights = book.items.filter((item) => item.type === "景点" && item.dayIndex >= 1 && item.dayIndex <= days);
+  const keptSightIds = new Set(keptSights.map((item) => item.id));
   const used = new Map<string, number>();
-  for (const item of lockedKeep) {
-    if (item.type !== "景点") continue;
+  for (const item of keptSights) {
     used.set(item.title, (used.get(item.title) ?? 0) + 1);
   }
   const generated: RoadbookItem[] = [];
   for (let day = 1; day <= days; day += 1) {
     const dayLocked = lockedKeep.filter((item) => item.dayIndex === day);
+    const daySights = keptSights.filter((item) => item.dayIndex === day);
     for (const entry of itemsForDay(book.city, day, days, next, {
       origin,
       withReturn: wantsInferredReturn({ brief: book.brief, origin, city: book.city, days }),
@@ -218,6 +220,8 @@ function rebuildForDayCount(
       allowRepeat: repeatRequested(book.brief),
     })) {
       if (dayLocked.some((item) => item.title === entry.title)) continue;
+      if (daySights.length > 0 && (entry.type === "景点" || entry.title === "自由活动")) continue;
+      if (entry.type !== "交通" && overlapsLocked(entry.startTime, entry.durationMinutes, daySights)) continue;
       if (overlapsLocked(entry.startTime, entry.durationMinutes, dayLocked)) continue;
       generated.push(entry);
     }
@@ -250,7 +254,7 @@ function rebuildForDayCount(
 
   const preservedIds = new Set(preserved.map((item) => item.id));
   const pack = (keepIds: Set<string>, additions: RoadbookItem[]) => {
-    const removed = book.items.filter((item) => !item.locked && !keepIds.has(item.id));
+    const removed = book.items.filter((item) => !item.locked && !keepIds.has(item.id) && !keptSightIds.has(item.id));
     const ops: PatchOp[] = removed.map((item) => ({ op: "remove", id: item.id }));
     for (const entry of additions) ops.push({ op: "add", item: entry });
     return { removed, ops };
@@ -478,10 +482,13 @@ export function planAssumptionEdit(
       droppedManual = rebuilt.droppedManual;
     }
     title = book.title.replace(/\d+\s*天/, `${days} 天`);
+    const rebuiltReturn = ops.find((op) => op.op === "add" && op.item.type === "交通" && op.item.title.startsWith("返回"));
+    const existingReturn = book.items.find((item) => item.type === "交通" && item.title.startsWith("返回") && !item.locked);
+    const returnClock = rebuiltReturn && rebuiltReturn.op === "add" ? rebuiltReturn.item.startTime : existingReturn?.startTime ?? "18:00";
     assumptions = assumptions.map((item) => {
       if (item.key !== "return" || !item.inferred) return item;
       if (wantsInferredReturn({ brief: book.brief, origin: tripOrigin(book), city: book.city, days })) {
-        return { ...item, value: `没写，按第 ${days} 天傍晚估` };
+        return { ...item, value: returnAssumptionValue(book.brief, days, returnClock) };
       }
       return { ...item, value: "这次不补", inferred: false, detail: "超过短途，不再补返程" };
     });

@@ -18,6 +18,28 @@ export function formatTime(minutes: number): string {
   return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 }
 
+/** Drop time-of-day wording that disagrees with the clock actually on the calendar. */
+export function noteForPlacedClock(note: string | undefined, startTime: string): string | undefined {
+  if (!note) return note;
+  const start = parseTime(startTime);
+  let text = note.replace(/先放在\s*\d{2}:\d{2}/g, `先放在 ${startTime}`);
+  if (start == null) return text;
+  const morning = start < 12 * 60;
+  if (!morning) {
+    text = text.replace(/单独一天的上午出发。?/g, "");
+    text = text.replace(/早上|上午|凌晨|清晨/g, "");
+  } else if (/晚上|傍晚/.test(text)) {
+    text = text.replace(/晚上|傍晚/g, "");
+  }
+  text = text
+    .replace(/^[，。、\s]+/, "")
+    .replace(/，{2,}/g, "，")
+    .replace(/。{2,}/g, "。")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return text;
+}
+
 export function endMinutes(startTime: string, durationMinutes: number): number | null {
   const start = parseTime(startTime);
   if (start == null) return null;
