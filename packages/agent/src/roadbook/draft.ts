@@ -108,6 +108,7 @@ function isHero(place: Place, mustVisit: string | null): boolean {
 }
 
 function isFullDay(place: Place): boolean {
+  if (GENERIC_VISIT.test(place.name)) return false;
   if (place.fullDay) return true;
   if (CLIMB_RE.test(place.name)) return true;
   return place.area === "景区" && place.name.endsWith("山") && place.keywords.includes(place.name);
@@ -505,7 +506,10 @@ export type DraftKind = "旅游" | "办事" | "混合";
 
 export type DraftLeg = {
   date: string | null;
+  /** Departure clock. Empty when the user only stated an arrival. */
   time: string | null;
+  /** Arrival clock from 「X点到」. Not a sight time. */
+  arriveTime?: string | null;
   mode: "高铁" | "飞机" | "自驾" | "其他" | null;
   from: string | null;
   to: string | null;
@@ -549,6 +553,9 @@ export type DraftSpec = {
 
 const DAY_START = 8 * 60;
 const DAY_LIMIT = 21 * 60 + 30;
+/** Climbs and stated morning clocks can start before the usual 08:00. */
+const EARLY_FLOOR = 5 * 60;
+const CLIMB_MINUTES = 7 * 60;
 
 function blankSpec(brief: string): DraftSpec {
   return {
@@ -603,20 +610,34 @@ function clockToHHMM(part: string | undefined, hourRaw: string, minuteRaw: strin
   return formatTime(hour * 60 + minute);
 }
 
-function clocksIn(brief: string): { time: string; index: number }[] {
-  const hits: { time: string; index: number }[] = [];
+type ClockHit = { time: string; index: number; end: number; arrival: boolean };
+
+/** 「3点到8点」 is a range. 「3点到」 / 「3点到乌镇」 is an arrival. */
+function isArrivalTail(after: string): boolean {
+  const trimmed = after.trimStart();
+  if (!/^(?:到达|抵达|到)/.test(trimmed)) return false;
+  const rest = trimmed.replace(/^(?:到达|抵达|到)/, "").trimStart();
+  if (/^(?:\d|[零〇一二两三四五六七八九十])/.test(rest)) return false;
+  return true;
+}
+
+function clocksIn(brief: string): ClockHit[] {
+  const hits: ClockHit[] = [];
   const spoken = /(上午|下午|晚上|中午|早上|凌晨|傍晚)?\s*(\d{1,2}|[零〇一二两俩三四五六七八九十]{1,3})\s*[点时](?:\s*(半|一刻|三刻|\d{1,2}))?/g;
   for (const match of brief.matchAll(spoken)) {
     if (match.index == null || !match[2]) continue;
     const time = clockToHHMM(match[1], match[2], match[3]);
-    if (time) hits.push({ time, index: match.index });
+    if (!time) continue;
+    const end = match.index + match[0].length;
+    hits.push({ time, index: match.index, end, arrival: isArrivalTail(brief.slice(end)) });
   }
   for (const match of brief.matchAll(/(\d{2}):(\d{2})/g)) {
     if (match.index == null || !match[1] || !match[2]) continue;
     const hour = Number(match[1]);
     const minute = Number(match[2]);
     if (hour > 23 || minute > 59) continue;
-    hits.push({ time: `${match[1]}:${match[2]}`, index: match.index });
+    const end = match.index + match[0].length;
+    hits.push({ time: `${match[1]}:${match[2]}`, index: match.index, end, arrival: isArrivalTail(brief.slice(end)) });
   }
   return hits;
 }
@@ -764,6 +785,7 @@ function applyBriefFacts(spec: DraftSpec, now: Date): void {
       if (date && !existing.date) existing.date = date;
     }
   }
+  applySpokenSchedule(spec, now);
 }
 
 function attachTransport(spec: DraftSpec, text: string, now: Date): void {
@@ -804,6 +826,106 @@ function modeOf(text: string): DraftLeg["mode"] {
   if (/自驾|开车/.test(text)) return "自驾";
   if (/火车|大巴|客车/.test(text)) return "其他";
   return null;
+}
+
+function visitMentions(brief: string): { name: string; index: number }[] {
+  const mentions: { name: string; index: number }[] = [];
+  const push = (name: string, index: number) => {
+    const key = canonicalVisitName(name).slice(0, 24);
+    if (!key || GENERIC_VISIT.test(key)) return;
+    if (mentions.some((item) => sameVisit(item.name, key))) return;
+    mentions.push({ name: key, index });
+  };
+  for (const hit of citiesInText(brief)) push(hit.landmark, hit.index);
+  for (const match of brief.matchAll(/(?:去爬|去登|爬|登)([\u4e00-\u9fa5]{2,8})/g)) {
+    if (match.index == null || !match[1]) continue;
+    push(match[1], match.index + match[0].lastIndexOf(match[1]));
+  }
+  return mentions;
+}
+
+/** 「下午3点到」 is when the traveler arrives, not when a sight starts. */
+function applyArrivalClock(spec: DraftSpec, now: Date): void {
+  const arrivals = clocksIn(spec.brief).filter((hit) => hit.arrival);
+  const pick = arrivals[0];
+  if (!pick) return;
+  const backAt = spec.brief.search(/返程|返回|回来|当天回|当日往返/);
+  const goAt = spec.brief.search(/去|出发|前往|去往|飞往|飞到/);
+  const forReturn = backAt >= 0 && (goAt < 0 || Math.abs(pick.index - backAt) < Math.abs(pick.index - goAt));
+  const chosen =
+    arrivals.find((hit) => {
+      if (!forReturn) return backAt < 0 || Math.abs(hit.index - backAt) > Math.abs(hit.index - Math.max(goAt, 0));
+      return Math.abs(hit.index - backAt) <= 16;
+    }) ?? pick;
+  const city = spec.city === "未写明的目的地" ? null : spec.city;
+  const today = shanghaiDate(now);
+  const date = dateNear(spec.brief, chosen.index, today, now) ?? spec.startDate;
+  const target = forReturn ? spec.inbound : spec.outbound;
+  const otherClocks = clocksIn(spec.brief).filter((hit) => !hit.arrival);
+  const statedDeparture = Boolean(target?.time && target.time !== chosen.time && otherClocks.some((hit) => hit.time === target.time));
+  const next: DraftLeg = {
+    date: target?.date ?? date,
+    time: statedDeparture ? target?.time ?? null : null,
+    arriveTime: chosen.time,
+    mode: target?.mode ?? modeOf(spec.brief),
+    from: target?.from ?? (forReturn ? city : spec.origin),
+    to: target?.to ?? (forReturn ? spec.origin : city),
+  };
+  if (forReturn) spec.inbound = next;
+  else spec.outbound = next;
+  const restored: string[] = [];
+  spec.fixed = spec.fixed.filter((item) => {
+    if (item.time !== chosen.time) return true;
+    if (item.type === "办事" || ERRAND_TITLE.test(item.title)) return true;
+    if (!isVisitTitle(item)) return true;
+    restored.push(item.title);
+    return false;
+  });
+  if (restored.length > 0) spec.interests = normalizeVisitNames([...spec.interests, ...restored]);
+}
+
+/** A clock next to a named sight stays on that sight. Arrival clocks are not reused. */
+function applyClockedVisits(spec: DraftSpec, now: Date): void {
+  const clocks = clocksIn(spec.brief).filter((hit) => !hit.arrival);
+  if (clocks.length === 0) return;
+  const today = shanghaiDate(now);
+  const blockers = [...spec.brief.matchAll(/高铁|动车|飞机|航班|出发|返程|返回|回来|体检|开会|会议|面试/g)]
+    .map((match) => match.index ?? -1)
+    .filter((index) => index >= 0);
+  const clocked: string[] = [];
+  for (const mention of visitMentions(spec.brief)) {
+    const clock = nearestClock(clocks, mention.index, spec.brief, blockers);
+    if (!clock) continue;
+    const existing = spec.fixed.find((item) => sameVisit(item.title, mention.name));
+    const date = dateNear(spec.brief, mention.index, today, now) ?? spec.startDate;
+    if (existing) {
+      existing.time = clock;
+      existing.title = mention.name;
+      if (!ERRAND_TITLE.test(existing.title)) existing.type = "景点";
+      if (!existing.date) existing.date = date;
+    } else {
+      spec.fixed.push({
+        date,
+        time: clock,
+        endTime: null,
+        title: mention.name,
+        place: mention.name,
+        type: "景点",
+      });
+    }
+    clocked.push(mention.name);
+  }
+  if (clocked.length === 0) return;
+  spec.interests = spec.interests.filter((name) => {
+    if (clocked.some((item) => sameVisit(item, name))) return false;
+    if (GENERIC_VISIT.test(name) || GENERIC_VISIT.test(canonicalVisitName(name))) return false;
+    return true;
+  });
+}
+
+function applySpokenSchedule(spec: DraftSpec, now: Date): void {
+  applyArrivalClock(spec, now);
+  applyClockedVisits(spec, now);
 }
 
 function extractArea(brief: string): string | null {
@@ -1089,6 +1211,70 @@ function statedSource(): RoadbookItem["source"] {
   return { kind: "推断", note: "来自你的原话" };
 }
 
+function isClimbTitle(title: string): boolean {
+  const name = canonicalVisitName(title);
+  if (GENERIC_VISIT.test(name) || GENERIC_VISIT.test(title)) return false;
+  return CLIMB_RE.test(name) || CLIMB_RE.test(title);
+}
+
+function fixedSpan(fixed: DraftFixed): number {
+  if (fixed.type === "办事" || ERRAND_TITLE.test(fixed.title)) return 120;
+  if ((fixed.type === "景点" || isVisitTitle(fixed)) && isClimbTitle(fixed.title)) return CLIMB_MINUTES;
+  return 90;
+}
+
+function namedInterest(place: Place, spec: DraftSpec): boolean {
+  const names = [...spec.interests];
+  if (spec.landmark) names.push(spec.landmark);
+  return names.some((name) => {
+    const key = canonicalVisitName(name);
+    if (!key) return false;
+    return place.name === key || place.name.includes(key) || key.includes(place.name);
+  });
+}
+
+/** Named sights keep the must-visit note. A missing city guide must not relabel them as a generic template. */
+function describeSight(place: Place, spec: DraftSpec, unknown: boolean): { note: string; source: RoadbookItem["source"] } {
+  const named = namedInterest(place, spec);
+  if (named && (unknown || place.detail.includes("你点名要去的地方"))) {
+    const note = place.detail.includes("你点名要去的地方") ? place.detail : `你点名要去的地方。${place.detail}`;
+    return { note, source: inferredSource("本地草稿") };
+  }
+  if (unknown) {
+    return {
+      note: "通用模板，地点是推断，不是别的城市的景点。",
+      source: inferredSource("通用模板，地点是推断"),
+    };
+  }
+  return { note: place.detail, source: inferredSource("本地草稿") };
+}
+
+function linkedInbound(spec: DraftSpec): boolean {
+  if (!spec.inbound) return false;
+  const from = spec.inbound.from ?? (spec.city === "未写明的目的地" ? null : spec.city);
+  const to = spec.inbound.to ?? spec.origin;
+  return Boolean(from && to && from !== to);
+}
+
+/**
+ * Rules/legacy add a return when origin is set and the trip is at most 3 days.
+ * An outbound leg (or any other anchor) skips that path, so fill the missing return here.
+ */
+function inferReturnIfAnchored(spec: DraftSpec): DraftSpec {
+  if (spec.ask || spec.kind !== "旅游" || useLegacy(spec) || linkedInbound(spec)) return spec;
+  if (!spec.origin || spec.city === "未写明的目的地" || spec.city === spec.origin || spec.days > 3) return spec;
+  return {
+    ...spec,
+    inbound: {
+      date: spec.startDate ? addDays(spec.startDate, spec.days - 1) : null,
+      time: null,
+      mode: spec.outbound?.mode ?? null,
+      from: spec.city,
+      to: spec.origin,
+    },
+  };
+}
+
 function anchoredItems(spec: DraftSpec, random: () => string, now: Date): RoadbookItem[] {
   const days = spec.days;
   const start = spec.startDate ?? shanghaiDate(now);
@@ -1129,8 +1315,41 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
   if (spec.outbound) {
     const from = spec.outbound.from ?? spec.origin;
     const to = spec.outbound.to ?? (spec.city === "未写明的目的地" ? null : spec.city);
-    if (from && to && from !== to) {
-      pushLeg(spec.outbound, dayIndexFor(spec.outbound.date, start, days), `从${from}前往${to}`, from);
+    const day = dayIndexFor(spec.outbound.date, start, days);
+    const arriveOnly = Boolean(spec.outbound.arriveTime) && !spec.outbound.time;
+    if (arriveOnly && to) {
+      const time = spec.outbound.arriveTime ?? "12:00";
+      const title = from && from !== to ? `从${from}到达${to}` : `到达${to}`;
+      if (!selfTrip(title)) {
+        const duration = 30;
+        items.push(
+          item(random, {
+            dayIndex: day,
+            startTime: time,
+            durationMinutes: duration,
+            title,
+            place: from ?? to,
+            type: "交通",
+            status: "待做",
+            travelEstimateMinutes: duration,
+            estimateSource: "推断",
+            locked: true,
+            priority: "必去",
+            indoor: true,
+            note: "来自你的原话。这是到达时间。班次请自己查。路书不代订。",
+            source: statedSource(),
+          }),
+        );
+        const startMin = parseTime(time) ?? DAY_START;
+        outboundMark.push({ day, end: startMin + duration });
+      }
+    } else if (from && to && from !== to) {
+      pushLeg(spec.outbound, day, `从${from}前往${to}`, from);
+      if (spec.outbound.arriveTime) {
+        const arrive = parseTime(spec.outbound.arriveTime);
+        const mark = outboundMark.find((entry) => entry.day === day);
+        if (mark && arrive != null) mark.end = Math.max(mark.end, arrive);
+      }
     }
   }
   if (spec.inbound) {
@@ -1170,35 +1389,53 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
 
   for (const fixed of spec.fixed) {
     const day = dayIndexFor(fixed.date, start, days);
-    const duration = fixed.type === "办事" ? 120 : 90;
+    const wanted = fixedSpan(fixed);
     const depart = inboundMark.find((mark) => mark.day === day)?.start ?? DAY_LIMIT;
     const windowEnd = Math.min(DAY_LIMIT, depart);
     const clockStated = Boolean(fixed.time);
     const stated = clockStated && fixed.time ? parseTime(fixed.time) : null;
-    const statedFits =
-      stated != null && stated >= DAY_START && stated + 30 <= windowEnd && !overlaps(stated, Math.min(duration, windowEnd - stated), items, day);
-    const startMin = statedFits
-      ? stated
-      : placeFree(items, day, DAY_START, windowEnd, stated != null && stated < windowEnd ? stated : 8 * 60, Math.min(duration, 150));
+    const searchFrom = stated != null && stated >= EARLY_FLOOR && stated < DAY_START ? stated : DAY_START;
+    const spanAt = (startMin: number) => Math.max(0, Math.min(wanted, windowEnd - startMin));
+    const fits = (startMin: number) => {
+      const span = spanAt(startMin);
+      if (startMin < EARLY_FLOOR || span < 30) return false;
+      if (isClimbTitle(fixed.title) && span < Math.min(wanted, 300)) return false;
+      return !overlaps(startMin, span, items, day);
+    };
+    let startMin: number | null = stated != null && fits(stated) ? stated : null;
+    if (startMin == null) {
+      const probes = isClimbTitle(fixed.title) ? [wanted, 360, 300] : [Math.min(wanted, 150)];
+      const preferred = stated != null && stated < windowEnd ? Math.max(stated, searchFrom) : DAY_START;
+      for (const probe of probes) {
+        startMin = placeFree(items, day, searchFrom, windowEnd, preferred, probe);
+        if (startMin != null) break;
+      }
+    }
     if (startMin == null) continue;
     const placedClock = formatTime(startMin);
-    const clockNote = clockStated ? "来自你的原话。" : `时间推断。钟点没写，先放在 ${placedClock}。`;
+    const span = Math.max(30, spanAt(startMin));
+    const honored = stated != null && startMin === stated && fits(stated);
+    const clockNote = honored
+      ? "来自你的原话。"
+      : clockStated
+        ? `时间推断。先放在 ${placedClock}。`
+        : `时间推断。钟点没写，先放在 ${placedClock}。`;
     items.push(
       item(random, {
         dayIndex: day,
-        startTime: formatTime(startMin),
-        durationMinutes: clampDuration(formatTime(startMin), duration),
+        startTime: placedClock,
+        durationMinutes: clampDuration(placedClock, span),
         title: fixed.title,
         place: fixed.place ? `${label} · ${fixed.place}` : `${label} · ${spec.area ?? "附近"}`,
         type: fixed.type,
         status: "待做",
         travelEstimateMinutes: 15,
         estimateSource: "推断",
-        locked: clockStated,
+        locked: honored,
         priority: "必去",
-        indoor: true,
+        indoor: fixed.type === "景点" && isClimbTitle(fixed.title) ? false : true,
         note: clockNote,
-        source: clockStated ? statedSource() : inferredSource("时间推断"),
+        source: honored ? statedSource() : inferredSource("时间推断"),
       }),
     );
   }
@@ -1236,21 +1473,24 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
     };
     if (spec.kind === "旅游") {
       let placedToday = 0;
-      const sightFields = (place: Place, interest: boolean) => ({
-        dayIndex: day,
-        startTime: "10:00",
-        durationMinutes: 100,
-        title: place.name,
-        place: `${label} · ${place.area}`,
-        type: "景点" as const,
-        status: "待做" as const,
-        travelEstimateMinutes: 20,
-        locked: false,
-        priority: interest ? ("必去" as const) : sightPriority(place, spec.landmark),
-        indoor: place.indoor,
-        note: unknown ? "通用模板，地点是推断，不是别的城市的景点。" : place.detail,
-        source: inferredSource(unknown ? "通用模板，地点是推断" : "本地草稿"),
-      });
+      const sightFields = (place: Place, interest: boolean) => {
+        const copy = describeSight(place, spec, unknown);
+        return {
+          dayIndex: day,
+          startTime: "10:00",
+          durationMinutes: 100,
+          title: place.name,
+          place: `${label} · ${place.area}`,
+          type: "景点" as const,
+          status: "待做" as const,
+          travelEstimateMinutes: 20,
+          locked: false,
+          priority: interest ? ("必去" as const) : sightPriority(place, spec.landmark),
+          indoor: place.indoor,
+          note: copy.note,
+          source: copy.source,
+        };
+      };
       if (earliest <= 9 * 60 + 30) {
         addAt(9 * 60, 40, {
           dayIndex: day,
@@ -1267,8 +1507,13 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
           source: inferredSource(unknown ? "通用模板，地点是推断" : "本地草稿"),
         });
       }
-      const first = claimSight(pool, used, spec.interests[0] ?? spec.landmark, false);
-      if (first && !visitPlaced(items, first.name) && placedToday < 2 && latest - earliest >= 90) {
+      const mustName = spec.interests[0] ?? spec.landmark;
+      let first = claimSight(pool, used, mustName, false);
+      if (first && visitPlaced(items, first.name) && !isClimbTitle(first.name)) {
+        first = claimSight(pool, used, mustName, false);
+      }
+      const climbAlready = items.some((entry) => entry.dayIndex === day && entry.type === "景点" && isClimbTitle(entry.title));
+      if (!climbAlready && first && !visitPlaced(items, first.name) && placedToday < 2 && latest - earliest >= 90) {
         const interest = spec.interests.some((name) => first.name.includes(name) || name.includes(first.name));
         const duration = isFullDay(first) ? Math.min(360, latest - earliest - 30) : 100;
         if (addAt(Math.max(earliest, 10 * 60), duration, sightFields(first, interest))) placedToday += 1;
@@ -1291,7 +1536,7 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
         const interest = spec.interests.some((name) => second.name.includes(name) || name.includes(second.name));
         if (addAt(Math.max(earliest, 14 * 60), 100, sightFields(second, interest))) placedToday += 1;
       }
-      if (placedToday === 0 && latest - earliest >= 90) {
+      if (!climbAlready && placedToday === 0 && latest - earliest >= 90) {
         const filler = fillerSight(used);
         if (!visitPlaced(items, filler.name) && addAt(Math.max(earliest, 10 * 60), 100, sightFields(filler, false))) {
           placedToday += 1;
@@ -1413,6 +1658,7 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
         const place = claimSight(pool, used, spec.interests[0] ?? spec.landmark, false);
         if (place && !visitPlaced(items, place.name)) {
           const interest = spec.interests.some((name) => place.name.includes(name) || name.includes(place.name));
+          const copy = describeSight(place, spec, unknown);
           if (
             addAt(Math.max(earliest, 10 * 60), 90, {
               dayIndex: day,
@@ -1426,8 +1672,8 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
               locked: false,
               priority: interest ? "必去" : "想去",
               indoor: place.indoor,
-              note: unknown ? "通用模板，地点是推断，不是别的城市的景点。" : place.detail,
-              source: inferredSource(unknown ? "通用模板，地点是推断" : "本地草稿"),
+              note: copy.note,
+              source: copy.source,
             })
           ) {
             sights += 1;
@@ -1466,8 +1712,9 @@ export function buildDraftFromSpec(spec: DraftSpec, options: DraftOptions): Road
     startDate: explicitStart,
     days: Math.min(7, Math.max(1, spec.days || 1)),
   };
+  const scheduled = inferReturnIfAnchored({ ...ready, startDate: resolvedStart });
   const items = (
-    ready.ask ? [] : useLegacy(ready) ? legacyItems(ready, random) : anchoredItems({ ...ready, startDate: resolvedStart }, random, now)
+    ready.ask ? [] : useLegacy(ready) ? legacyItems(ready, random) : anchoredItems(scheduled, random, now)
   ).filter((entry) => !selfTrip(entry.title));
   const city = ready.city;
   const cityInferred = ready.cityInferred;
@@ -1553,7 +1800,7 @@ export function buildDraftFromSpec(spec: DraftSpec, options: DraftOptions): Road
     assumptions,
     items,
     weather: [],
-    verifyChecklist: verifyLines(ready).map((text) => ({ id: `v_${random()}`, text })),
+    verifyChecklist: verifyLines(ready.ask || useLegacy(ready) ? ready : scheduled).map((text) => ({ id: `v_${random()}`, text })),
     patchHistory: [
       {
         id: `p_${random()}`,

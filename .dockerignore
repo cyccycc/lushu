@@ -4,7 +4,12 @@ node_modules
 **/.next
 data
 .git
+# Real env files stay out of the image. .env.example is the committed template and must be included.
 .env
-.env.*
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
 *.log
 .DS_Store

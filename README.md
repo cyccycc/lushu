@@ -85,7 +85,7 @@ AUTH_SECRET=另一长串随机字符串
 
 ## 部署
 
-自用可以放在海外，不必先备案。本仓库给了一个 Docker 跑法：
+自用可以放在海外，不必先备案。本仓库给了一个 Docker 跑法。构建和导出打包时排除 `.env`、`.env.local` 这类真正的密钥文件；`.env.example` 只是空模板，要留在仓库和镜像里。
 
 ```bash
 docker build -t lushu .

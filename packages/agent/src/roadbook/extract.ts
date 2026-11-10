@@ -212,7 +212,8 @@ function promptFor(now: Date): string {
 规则：
 - 只抽取用户明说的内容。没提到的字符串填 null，数组填 []。不要猜人数、预算、节奏，不要规划景点，不要编车次或航班号。
 - fixed 只放两类：办事，或写了具体钟点的约定。体检、开会、会议、面试、出差是办事。没写钟点的办事 time 填 null，仍然留在 fixed，不能只写进 missing。早上、下午不是钟点。
-- 没写钟点的景点、爬山、逛逛不要放进 fixed，写进 interests。同一件事不要同时出现在 fixed 和 interests，也不要再写同名或近义项（已有「泰山」就不要再写「爬泰山」或「爬山」）。
+- 没写钟点的景点、爬山、逛逛不要放进 fixed，写进 interests。写了具体钟点的景点、爬山留在 fixed，time 用 HH:mm，标题用景点名（写泰山，不要写爬泰山）。同一件事不要同时出现在 fixed 和 interests，也不要再写同名或近义项（已有「泰山」就不要再写「爬泰山」或「爬山」）。
+- 「下午3点到」「3点到达」是到达时间。去程写进 outbound.time，返程写进 inbound.time。不要把到达钟点写成景点 fixed。
 - 说了已订、订好了、已经订了，lodging.booked 就是 true。没提酒店就让 lodging 为 null。
 - 返程没写交通方式时，mode 沿用去程；去程也没写才填 null。
 - kind 只能是「旅游」「办事」「混合」。体检、开会、出差且没说要玩，用「办事」。又办事又玩，用「混合」。只说去玩、爬山，用「旅游」。
@@ -229,8 +230,12 @@ function promptFor(now: Date): string {
 要点：fixed 必须有周四 14:00 的开会，type=办事，不能漏。
 用户：想去爬泰山
 要点：kind=旅游，destination.city=泰安，interests 含泰山，fixed 为 []。不要把「爬泰山」放进 fixed，也不要再写「爬山」。
+用户：明天早上7点去爬泰山
+要点：kind=旅游，destination.city=泰安，fixed 有 {time:07:00, title:泰山, type:景点}。写了钟点就留在 fixed，不要只放进 interests。
 用户：周六从杭州去乌镇
-要点：origin=杭州，destination.city=嘉兴，interests 含乌镇。城市不要写成乌镇。`;
+要点：origin=杭州，destination.city=嘉兴，interests 含乌镇。城市不要写成乌镇。
+用户：周六去乌镇，下午3点到
+要点：destination.city=嘉兴，interests 含乌镇，outbound.time=15:00 表示到达。不要把乌镇放进 fixed。`;
 }
 
 /**

@@ -763,6 +763,61 @@ function overlappingMeal(book: Roadbook, titlePart: string): string | null {
   return `${sight.title} ${sight.startTime}（${sight.durationMinutes} 分钟）与 ${meal.title} ${meal.startTime} 重叠`;
 }
 
+function assertNamedSight(book: Roadbook, titlePart: string): string | null {
+  const sight = book.items.find((item) => item.type === "景点" && item.title.includes(titlePart));
+  if (!sight || sight.priority !== "必去") return `${titlePart}应是必去`;
+  const note = `${sight.note ?? ""}`;
+  if (!note.includes("你点名要去的地方")) return `${titlePart}应写你点名要去的地方：${note}`;
+  if (/通用模板|地点是推断/.test(`${sight.note ?? ""} ${sight.source.note ?? ""}`)) {
+    return `${titlePart}不应标成通用模板`;
+  }
+  return null;
+}
+
+function assertReturnTo(book: Roadbook, origin: string): string | null {
+  const back = book.items.find((item) => {
+    if (item.type !== "交通") return false;
+    if (item.title === `返回${origin}` || item.title.includes(`到达${origin}`)) return true;
+    return item.title.includes(`前往${origin}`) && !item.title.includes(`前往${book.city}`);
+  });
+  if (!back) return `应有回到${origin}的交通`;
+  return null;
+}
+
+function assertStatedTaishan(book: Roadbook): string | null {
+  const shape = assertTaishanShape(book);
+  if (shape) return shape;
+  const climb = book.items.find((item) => item.type === "景点" && item.title.includes("泰山"));
+  if (!climb) return "缺少泰山";
+  const blob = `${climb.note ?? ""}${climb.source.note ?? ""}`;
+  if (climb.startTime === "07:00") {
+    if (!climb.locked) return "07:00 的泰山应锁定";
+    if (!blob.includes("来自你的原话")) return `07:00 应注明来自你的原话：${blob}`;
+    return null;
+  }
+  if (climb.locked) return `泰山放到 ${climb.startTime} 后不应锁定`;
+  if (blob.includes("来自你的原话")) return "改点后不应再写来自你的原话";
+  if (!blob.includes("时间推断")) return "改点后应标时间推断";
+  return null;
+}
+
+function assertWuzhenArrival(book: Roadbook): string | null {
+  if (book.city !== "嘉兴") return `乌镇应是嘉兴，得到 ${book.city}`;
+  const named = assertNamedSight(book, "乌镇");
+  if (named) return named;
+  const overlap = overlappingMeal(book, "乌镇");
+  if (overlap) return overlap;
+  const arrival = book.items.find((item) => item.type === "交通" && item.startTime === "15:00");
+  if (!arrival?.locked) return "下午3点到应写在锁定的 15:00 交通上";
+  const sight = book.items.find((item) => item.type === "景点" && item.title.includes("乌镇"));
+  if (!sight) return "缺少乌镇";
+  if (sight.startTime === "15:00") return "3点到不应写成乌镇的钟点";
+  if (sight.locked && `${sight.note ?? ""}${sight.source.note ?? ""}`.includes("来自你的原话")) {
+    return "乌镇不应锁成到达钟点";
+  }
+  return null;
+}
+
 function assertTaishanShape(book: Roadbook, strictStart = false): string | null {
   if (book.city !== "泰安") return `泰山应是泰安，得到 ${book.city}`;
   const climbs = book.items.filter((item) => item.type === "景点" && /泰山|爬山|登山/.test(item.title));
@@ -1039,9 +1094,158 @@ function assertExtractSync(jinan: { brief: string; now: string; extract: TripExt
   );
   if (typeof badWuzhen === "string") return badWuzhen;
   if (badWuzhen.city !== "嘉兴") return `把乌镇当城市时应改成嘉兴，得到 ${badWuzhen.city}`;
-  if (!badWuzhen.items.some((item) => item.title.includes("乌镇") && item.priority === "必去")) return "把乌镇当城市时仍应有乌镇必去";
+  const badWuzhenNamed = assertNamedSight(badWuzhen, "乌镇");
+  if (badWuzhenNamed) return `把乌镇当城市：${badWuzhenNamed}`;
+  const badWuzhenBack = assertReturnTo(badWuzhen, "杭州");
+  if (badWuzhenBack) return `把乌镇当城市：${badWuzhenBack}`;
   const badWuzhenOverlap = overlappingMeal(badWuzhen, "乌镇");
   if (badWuzhenOverlap) return badWuzhenOverlap;
+
+  const anchoredWuzhen = bookFromExtract(
+    {
+      kind: "旅游",
+      origin: "杭州",
+      destination: { city: "嘉兴", area: null },
+      startDate: "2026-11-14",
+      endDate: "2026-11-16",
+      party: null,
+      outbound: { date: "2026-11-14", time: null, mode: null, from: "杭州", to: "嘉兴" },
+      inbound: null,
+      fixed: [],
+      lodging: null,
+      interests: ["乌镇"],
+      pace: null,
+      budget: null,
+      missing: [],
+    },
+    "周六从杭州去乌镇",
+    now,
+    "wuzhen-anchored",
+  );
+  if (typeof anchoredWuzhen === "string") return anchoredWuzhen;
+  if (anchoredWuzhen.city !== "嘉兴") return `带去程的乌镇应是嘉兴，得到 ${anchoredWuzhen.city}`;
+  const anchoredNamed = assertNamedSight(anchoredWuzhen, "乌镇");
+  if (anchoredNamed) return `带去程的乌镇：${anchoredNamed}`;
+  const anchoredBack = assertReturnTo(anchoredWuzhen, "杭州");
+  if (anchoredBack) return `带去程的乌镇：${anchoredBack}`;
+  const anchoredOut = anchoredWuzhen.items.find((item) => item.type === "交通" && item.title.includes("前往嘉兴"));
+  if (!anchoredOut) return "带去程的乌镇应保留杭州到嘉兴";
+  const anchoredOverlap = overlappingMeal(anchoredWuzhen, "乌镇");
+  if (anchoredOverlap) return anchoredOverlap;
+
+  const arrivalMisread = bookFromExtract(
+    {
+      kind: "旅游",
+      origin: null,
+      destination: { city: "嘉兴", area: null },
+      startDate: "2026-11-14",
+      endDate: null,
+      party: null,
+      outbound: { date: "2026-11-14", time: "15:00", mode: null, from: null, to: "嘉兴" },
+      inbound: null,
+      fixed: [{ date: "2026-11-14", time: "15:00", endTime: null, title: "乌镇", place: "乌镇", type: "景点" }],
+      lodging: null,
+      interests: [],
+      pace: null,
+      budget: null,
+      missing: [],
+    },
+    "周六去乌镇，下午3点到",
+    now,
+    "wuzhen-arrive-misread",
+  );
+  if (typeof arrivalMisread === "string") return arrivalMisread;
+  const arrivalMisreadProblem = assertWuzhenArrival(arrivalMisread);
+  if (arrivalMisreadProblem) return `模型把到达写成景点：${arrivalMisreadProblem}`;
+
+  const droppedClock = bookFromExtract(
+    {
+      kind: "旅游",
+      origin: null,
+      destination: { city: "泰安", area: null },
+      startDate: "2026-11-07",
+      endDate: null,
+      party: null,
+      outbound: null,
+      inbound: null,
+      fixed: [],
+      lodging: null,
+      interests: ["泰山"],
+      pace: null,
+      budget: null,
+      missing: [],
+    },
+    "明天早上7点去爬泰山",
+    now,
+    "tai-clock-dropped",
+  );
+  if (typeof droppedClock === "string") return droppedClock;
+  const droppedShape = assertStatedTaishan(droppedClock);
+  if (droppedShape) return `模型漏了泰山钟点：${droppedShape}`;
+
+  const keptClock = bookFromExtract(
+    {
+      kind: "旅游",
+      origin: null,
+      destination: { city: "泰安", area: null },
+      startDate: "2026-11-07",
+      endDate: null,
+      party: null,
+      outbound: null,
+      inbound: null,
+      fixed: [{ date: "2026-11-07", time: "07:00", endTime: null, title: "爬泰山", place: "泰山", type: "景点" }],
+      lodging: null,
+      interests: ["爬山"],
+      pace: null,
+      budget: null,
+      missing: [],
+    },
+    "明天早上7点去爬泰山",
+    now,
+    "tai-clock-fixed",
+  );
+  if (typeof keptClock === "string") return keptClock;
+  const keptShape = assertStatedTaishan(keptClock);
+  if (keptShape) return `写了钟点的爬泰山：${keptShape}`;
+  if (keptClock.items.some((item) => item.type === "景点" && item.durationMinutes <= 120 && /泰山|爬|山/.test(item.title))) {
+    return "写了钟点的泰山不应再用 90 分钟的固定时长";
+  }
+
+  const movedClock = bookFromExtract(
+    {
+      kind: "办事",
+      origin: null,
+      destination: { city: "济南", area: null },
+      startDate: "2026-11-07",
+      endDate: "2026-11-07",
+      party: null,
+      outbound: null,
+      inbound: null,
+      fixed: [
+        { date: "2026-11-07", time: "07:00", endTime: null, title: "体检", place: null, type: "办事" },
+        { date: "2026-11-07", time: "07:00", endTime: null, title: "开会", place: null, type: "办事" },
+      ],
+      lodging: null,
+      interests: [],
+      pace: null,
+      budget: null,
+      missing: [],
+    },
+    "明天早上7点在济南体检，早上7点开会",
+    now,
+    "two-clocks",
+  );
+  if (typeof movedClock === "string") return movedClock;
+  const keptEarly = movedClock.items.find((item) => item.type === "办事" && item.startTime === "07:00");
+  const movedEarly = movedClock.items.find((item) => item.type === "办事" && item.startTime !== "07:00");
+  if (!keptEarly?.locked || !`${keptEarly.note ?? ""}${keptEarly.source.note ?? ""}`.includes("来自你的原话")) {
+    return "放得下的 07:00 应锁定并写来自你的原话";
+  }
+  if (!movedEarly) return "重叠的 07:00 应挪开";
+  const movedBlob = `${movedEarly.note ?? ""}${movedEarly.source.note ?? ""}`;
+  if (movedEarly.locked || movedBlob.includes("来自你的原话") || !movedBlob.includes("时间推断")) {
+    return `挪点后不应锁定或写成原话：${movedEarly.title} ${movedEarly.startTime} ${movedBlob}`;
+  }
 
   const clockedPalace = bookFromExtract(
     {
@@ -1211,9 +1415,22 @@ function assertQaRound2(): string | null {
   const wuzhen = buildDraft("周六从杭州去乌镇", { id: "wuzhen", now, random });
   if (wuzhen.startDate !== "2026-11-14") return `周六应从 2026-11-14 开始，得到 ${wuzhen.startDate}`;
   if (wuzhen.city !== "嘉兴") return `乌镇应是嘉兴，得到 ${wuzhen.city}`;
-  if (!wuzhen.items.some((item) => item.title.includes("乌镇") && item.priority === "必去")) return "乌镇应是必去";
+  const wuzhenNamed = assertNamedSight(wuzhen, "乌镇");
+  if (wuzhenNamed) return wuzhenNamed;
+  const wuzhenBack = assertReturnTo(wuzhen, "杭州");
+  if (wuzhenBack) return wuzhenBack;
   const wuzhenOverlap = overlappingMeal(wuzhen, "乌镇");
   if (wuzhenOverlap) return wuzhenOverlap;
+  const wuzhenArrive = buildDraft("周六去乌镇，下午3点到", { id: "wuzhen-arrive", now, random });
+  const wuzhenArriveProblem = assertWuzhenArrival(wuzhenArrive);
+  if (wuzhenArriveProblem) return wuzhenArriveProblem;
+  const statedClimb = buildDraft("明天早上7点去爬泰山", { id: "tai-clock", now, random });
+  const statedClimbProblem = assertStatedTaishan(statedClimb);
+  if (statedClimbProblem) return statedClimbProblem;
+  const flightOnly = buildDraft("坐飞机到西宁", { id: "xining-short", now, random });
+  if (flightOnly.city !== "西宁" || flightOnly.items.length === 0) return `坐飞机到西宁应排出西宁，得到 ${flightOnly.city}`;
+  if (flightOnly.question) return "坐飞机到西宁不应只追问";
+  if (!flightOnly.items.some((item) => item.dayIndex === 3 && item.type === "景点")) return "坐飞机到西宁的第 3 天应有景点";
   const luoyang = buildDraft("下周去洛阳", { id: "luoyang", now, random });
   if (luoyang.startDate !== "2026-11-16") return `下周应从 2026-11-16 开始，得到 ${luoyang.startDate}`;
   const when = luoyang.assumptions.find((item) => item.key === "when");
@@ -1336,9 +1553,44 @@ async function assertLiveExtract(): Promise<string | null> {
       brief: "周六从杭州去乌镇",
       check: (book) => {
         if (book.city !== "嘉兴") return `乌镇应是嘉兴，得到 ${book.city}`;
-        if (!book.items.some((item) => item.title.includes("乌镇") && item.priority === "必去")) return "应有乌镇必去";
+        const named = assertNamedSight(book, "乌镇");
+        if (named) return named;
+        const back = assertReturnTo(book, "杭州");
+        if (back) return back;
         return overlappingMeal(book, "乌镇");
       },
+    },
+    {
+      brief: "明天从北京坐飞机到西宁，玩3天",
+      check: (book) => {
+        if (book.city !== "西宁" || book.items.length === 0) return `西宁应排出行程，得到 ${book.city}`;
+        if (!book.items.some((item) => item.dayIndex === 3 && item.type === "景点")) return "西宁第 3 天没有景点";
+        const flight = book.items.find((item) => item.title.includes("北京") && item.title.includes("西宁"));
+        if (!flight) return "西宁去程缺失";
+        return null;
+      },
+    },
+    {
+      brief: "坐飞机到西宁",
+      check: (book) => {
+        if (book.question || book.items.length === 0 || book.city !== "西宁") return `坐飞机到西宁应排出西宁，得到 ${book.city}`;
+        return null;
+      },
+    },
+    {
+      brief: "想去个暖和的地方",
+      check: (book) => {
+        if (book.question?.prompt !== "去哪座城市？" || book.items.length > 0) return "想去个暖和的地方应只追问，行程项为空";
+        return null;
+      },
+    },
+    {
+      brief: "明天早上7点去爬泰山",
+      check: (book) => assertStatedTaishan(book),
+    },
+    {
+      brief: "周六去乌镇，下午3点到",
+      check: (book) => assertWuzhenArrival(book),
     },
     {
       brief: "这周末想去西湖走走，两个人",
