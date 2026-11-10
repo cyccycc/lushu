@@ -1,6 +1,6 @@
 import { guideFor, hasCityGuide, type Place } from "../cities";
 import { citiesInText, cityByName } from "@lushu/tools/place";
-import { parseBrief, parseZhNumber } from "../parse";
+import { parseBrief, parseZhNumber, statedPartyCount } from "../parse";
 import { addDays, daysBetween, formatTime, inferStartDate, inferWeekdayDate, nextWeekMonday, parseTime, shanghaiDate, weekdayInWeek } from "./time";
 import type { Assumption, ItemType, Roadbook, RoadbookItem } from "./types";
 
@@ -171,6 +171,34 @@ export type DayBuildOptions = {
   allowRepeat?: boolean;
 };
 
+const INFERRED_RETURN_NOTE = "原话没提返程，按短途补的。不回去就删掉";
+
+function inferredReturnItem(
+  random: () => string,
+  dayIndex: number,
+  origin: string,
+  placeName: string,
+  mode: "高铁" | "飞机" | "自驾" | "其他" | null,
+): RoadbookItem {
+  const ride = modeMinutes(mode, placeName, origin);
+  return item(random, {
+    dayIndex,
+    startTime: "18:00",
+    durationMinutes: clampDuration("18:00", ride),
+    title: `返回${origin}`,
+    place: placeName,
+    type: "交通",
+    status: "待做",
+    travelEstimateMinutes: ride,
+    estimateSource: "推断",
+    locked: false,
+    priority: "必去",
+    indoor: true,
+    note: INFERRED_RETURN_NOTE,
+    source: inferredSource("时间推断"),
+  });
+}
+
 export function itemsForDay(
   city: string,
   dayIndex: number,
@@ -274,19 +302,21 @@ export function itemsForDay(
     items.push(
       item(random, {
         dayIndex,
-        startTime: "15:00",
-        durationMinutes: 90,
-        title: `返回${options.origin}`,
-        place: placeName,
+        startTime: "17:00",
+        durationMinutes: 60,
+        title: "去车站",
+        place: `${placeName} · 车站`,
         type: "交通",
         status: "待做",
-        travelEstimateMinutes: 15,
+        travelEstimateMinutes: 60,
         locked: false,
         priority: "必去",
         indoor: true,
-        note: "返程自己查班次。路书不代订。",
+        note: "返程前预留 60 分钟去车站，时刻是推断。",
+        source: inferredSource("返程前预留去车站的时间"),
       }),
     );
+    items.push(inferredReturnItem(random, dayIndex, options.origin, placeName, null));
   } else {
     items.push(
       item(random, {
@@ -321,22 +351,22 @@ export function itemsForDay(
       }),
     );
   }
-  items.push(
-    item(random, {
-      dayIndex,
-      startTime: "18:00",
-      durationMinutes: 70,
-      title: guide.food[2] ?? "晚饭",
-      place: placeName,
-      type: "餐",
-      status: "待做",
-      travelEstimateMinutes: 15,
-      locked: false,
-      priority: "想去",
-      indoor: true,
-    }),
-  );
   if (!(dayIndex === dayCount && options.withReturn && options.origin)) {
+    items.push(
+      item(random, {
+        dayIndex,
+        startTime: "18:00",
+        durationMinutes: 70,
+        title: guide.food[2] ?? "晚饭",
+        place: placeName,
+        type: "餐",
+        status: "待做",
+        travelEstimateMinutes: 15,
+        locked: false,
+        priority: "想去",
+        indoor: true,
+      }),
+    );
     items.push(
       item(random, {
         dayIndex,
@@ -446,19 +476,21 @@ function fullDayItems(
     items.push(
       item(random, {
         dayIndex,
-        startTime: arriving ? "15:20" : "14:40",
-        durationMinutes: 90,
-        title: `返回${origin}`,
-        place: placeName,
+        startTime: "17:00",
+        durationMinutes: 60,
+        title: "去车站",
+        place: `${placeName} · 车站`,
         type: "交通",
         status: "待做",
-        travelEstimateMinutes: 15,
+        travelEstimateMinutes: 60,
         locked: false,
         priority: "必去",
         indoor: true,
-        note: "返程自己查班次。路书不代订。",
+        note: "返程前预留 60 分钟去车站，时刻是推断。",
+        source: inferredSource("返程前预留去车站的时间"),
       }),
     );
+    items.push(inferredReturnItem(random, dayIndex, origin, placeName, null));
   } else {
     items.push(
       item(random, {
@@ -477,21 +509,23 @@ function fullDayItems(
       }),
     );
   }
-  items.push(
-    item(random, {
-      dayIndex,
-      startTime: "18:00",
-      durationMinutes: 70,
-      title: guide.food[2] ?? "晚饭",
-      place: placeName,
-      type: "餐",
-      status: "待做",
-      travelEstimateMinutes: 15,
-      locked: false,
-      priority: "想去",
-      indoor: true,
-    }),
-  );
+  if (!returning) {
+    items.push(
+      item(random, {
+        dayIndex,
+        startTime: "18:00",
+        durationMinutes: 70,
+        title: guide.food[2] ?? "晚饭",
+        place: placeName,
+        type: "餐",
+        status: "待做",
+        travelEstimateMinutes: 15,
+        locked: false,
+        priority: "想去",
+        indoor: true,
+      }),
+    );
+  }
   return items;
 }
 
@@ -610,7 +644,7 @@ function clockToHHMM(part: string | undefined, hourRaw: string, minuteRaw: strin
   return formatTime(hour * 60 + minute);
 }
 
-type ClockHit = { time: string; index: number; end: number; arrival: boolean };
+type ClockHit = { time: string; index: number; end: number; arrival: boolean; rangeEnd: string | null };
 
 /** 「3点到8点」 is a range. 「3点到」 / 「3点到乌镇」 is an arrival. */
 function isArrivalTail(after: string): boolean {
@@ -621,23 +655,80 @@ function isArrivalTail(after: string): boolean {
   return true;
 }
 
+const CLOCK_WORD = "上午|下午|晚上|中午|早上|凌晨|傍晚";
+const CLOCK_HOUR = "\\d{1,2}|[零〇一二两俩三四五六七八九十]{1,3}";
+const CLOCK_MINUTE = "半|一刻|三刻|\\d{1,2}";
+
+function afternoonPartBefore(brief: string, index: number): string | undefined {
+  const bounds = sentenceBounds(brief, index);
+  const slice = brief.slice(bounds.start, index);
+  const found = [...slice.matchAll(/下午|晚上|傍晚|中午/g)];
+  return found.length > 0 ? found[found.length - 1]?.[0] : undefined;
+}
+
+function rangeEndClock(
+  startPart: string | undefined,
+  endPart: string | undefined,
+  startTime: string,
+  hourRaw: string,
+  minuteRaw: string | undefined,
+): string | null {
+  const parsed = clockToHHMM(endPart || startPart, hourRaw, minuteRaw);
+  if (!parsed) return null;
+  const startMin = parseTime(startTime);
+  let endMin = parseTime(parsed);
+  if (startMin == null || endMin == null) return null;
+  if (!endPart && endMin <= startMin && endMin + 12 * 60 > startMin && endMin + 12 * 60 < 24 * 60) {
+    endMin += 12 * 60;
+  }
+  if (endMin <= startMin) return null;
+  return formatTime(endMin);
+}
+
+function rangesIn(brief: string): { start: string; end: string; index: number; endIndex: number }[] {
+  const re = new RegExp(
+    `(${CLOCK_WORD})?\\s*(${CLOCK_HOUR})\\s*[点时](?:\\s*(${CLOCK_MINUTE}))?\\s*(?:到|至)\\s*(?:(${CLOCK_WORD})\\s*)?(${CLOCK_HOUR})\\s*[点时](?:\\s*(${CLOCK_MINUTE}))?`,
+    "g",
+  );
+  const found: { start: string; end: string; index: number; endIndex: number }[] = [];
+  for (const match of brief.matchAll(re)) {
+    if (match.index == null || !match[2] || !match[5]) continue;
+    const start = clockToHHMM(match[1], match[2], match[3]);
+    if (!start) continue;
+    const end = rangeEndClock(match[1], match[4], start, match[5], match[6]);
+    if (!end) continue;
+    found.push({ start, end, index: match.index, endIndex: match.index + match[0].length });
+  }
+  return found;
+}
+
 function clocksIn(brief: string): ClockHit[] {
+  const ranges = rangesIn(brief);
   const hits: ClockHit[] = [];
-  const spoken = /(上午|下午|晚上|中午|早上|凌晨|傍晚)?\s*(\d{1,2}|[零〇一二两俩三四五六七八九十]{1,3})\s*[点时](?:\s*(半|一刻|三刻|\d{1,2}))?/g;
+  const covered = (index: number) => ranges.some((range) => index >= range.index && index < range.endIndex);
+  for (const range of ranges) {
+    hits.push({ time: range.start, index: range.index, end: range.endIndex, arrival: false, rangeEnd: range.end });
+  }
+  const spoken = new RegExp(`(${CLOCK_WORD})?\\s*(${CLOCK_HOUR})\\s*[点时](?:\\s*(${CLOCK_MINUTE}))?`, "g");
   for (const match of brief.matchAll(spoken)) {
-    if (match.index == null || !match[2]) continue;
-    const time = clockToHHMM(match[1], match[2], match[3]);
-    if (!time) continue;
+    if (match.index == null || !match[2] || covered(match.index)) continue;
     const end = match.index + match[0].length;
-    hits.push({ time, index: match.index, end, arrival: isArrivalTail(brief.slice(end)) });
+    const arrival = isArrivalTail(brief.slice(end));
+    let time = clockToHHMM(match[1], match[2], match[3]);
+    if (!time && !match[1] && arrival) {
+      const inherited = afternoonPartBefore(brief, match.index);
+      if (inherited) time = clockToHHMM(inherited, match[2], match[3]);
+    }
+    if (!time) continue;
+    hits.push({ time, index: match.index, end, arrival, rangeEnd: null });
   }
   for (const match of brief.matchAll(/(\d{2}):(\d{2})/g)) {
-    if (match.index == null || !match[1] || !match[2]) continue;
+    if (match.index == null || !match[1] || !match[2] || covered(match.index)) continue;
     const hour = Number(match[1]);
     const minute = Number(match[2]);
     if (hour > 23 || minute > 59) continue;
     const end = match.index + match[0].length;
-    hits.push({ time: `${match[1]}:${match[2]}`, index: match.index, end, arrival: isArrivalTail(brief.slice(end)) });
+    hits.push({ time: `${match[1]}:${match[2]}`, index: match.index, end, arrival: isArrivalTail(brief.slice(end)), rangeEnd: null });
   }
   return hits;
 }
@@ -656,9 +747,9 @@ function sentenceBounds(brief: string, index: number): { start: number; end: num
   return { start, end };
 }
 
-function nearestClock(hits: { time: string; index: number }[], index: number, brief: string, others: number[] = []): string | null {
+function nearestClock(hits: ClockHit[], index: number, brief: string, others: number[] = []): ClockHit | null {
   const bounds = sentenceBounds(brief, index);
-  let best: { time: string; index: number } | null = null;
+  let best: ClockHit | null = null;
   let dist = Number.POSITIVE_INFINITY;
   for (const hit of hits) {
     if (hit.index < bounds.start || hit.index > bounds.end) continue;
@@ -672,7 +763,51 @@ function nearestClock(hits: { time: string; index: number }[], index: number, br
   for (const other of others) {
     if (other >= 0 && Math.abs(best.index - other) < dist) return null;
   }
-  return best.time;
+  return best;
+}
+
+function returnWordIndex(brief: string): number {
+  for (const match of brief.matchAll(/返程|回来|返回|回程|当天回|当日往返|当日回/g)) {
+    const index = match.index ?? -1;
+    if (index < 0) continue;
+    if (brief[index - 1] === "不") continue;
+    return index;
+  }
+  return -1;
+}
+
+/** A return clock the brief actually stated. Arrival clocks that only echo 「X点到」 do not count. */
+function statedReturnClock(brief: string): string | null {
+  const backAt = returnWordIndex(brief);
+  if (backAt < 0) return null;
+  const clocks = clocksIn(brief).filter((hit) => !hit.rangeEnd);
+  const goAt = brief.search(/高铁|动车|飞机|航班|火车|出发|去往|前往/);
+  const blockers = goAt >= 0 ? [goAt] : [];
+  const spoken = nearestClock(
+    clocks.filter((hit) => !hit.arrival),
+    backAt,
+    brief,
+    blockers,
+  );
+  if (spoken) return spoken.time;
+  const arrival = nearestClock(
+    clocks.filter((hit) => hit.arrival),
+    backAt,
+    brief,
+    blockers,
+  );
+  return arrival?.time ?? null;
+}
+
+function refusesReturn(brief: string): boolean {
+  return /单程|不回来|不返回|不返程|然后去|一路玩到/.test(brief);
+}
+
+/** Short trips get an editable evening return unless the brief said not to come back, or already named a return clock. */
+export function wantsInferredReturn(input: { brief: string; origin: string | null; city: string; days: number }): boolean {
+  if (refusesReturn(input.brief) || statedReturnClock(input.brief)) return false;
+  if (!input.origin || input.city === "未写明的目的地" || input.city === input.origin) return false;
+  return input.days <= 3;
 }
 
 function dateNear(brief: string, index: number, today: string, now: Date): string | null {
@@ -772,8 +907,8 @@ function applyBriefFacts(spec: DraftSpec, now: Date): void {
       if (!existing) {
         spec.fixed.push({
           date,
-          time: clock,
-          endTime: null,
+          time: clock?.time ?? null,
+          endTime: clock?.rangeEnd ?? null,
           title: event.title,
           place: spec.area,
           type: "办事",
@@ -781,11 +916,70 @@ function applyBriefFacts(spec: DraftSpec, now: Date): void {
         continue;
       }
       if (!clock) existing.time = null;
-      else if (!existing.time) existing.time = clock;
+      else if (!existing.time) {
+        existing.time = clock.time;
+        if (clock.rangeEnd) existing.endTime = clock.rangeEnd;
+      }
       if (date && !existing.date) existing.date = date;
     }
   }
   applySpokenSchedule(spec, now);
+  alignDepartureClock(spec);
+  alignReturnHonesty(spec);
+}
+
+/** Keep a spoken departure on the outbound. An arrival clock must not occupy that field. */
+function alignDepartureClock(spec: DraftSpec): void {
+  const clocks = clocksIn(spec.brief).filter((hit) => !hit.arrival && !hit.rangeEnd);
+  const goAt = spec.brief.search(/高铁|动车|飞机|航班|火车|出发|去往|前往/);
+  if (goAt < 0) return;
+  const backAt = returnWordIndex(spec.brief);
+  const hit = nearestClock(clocks, goAt, spec.brief, backAt >= 0 ? [backAt] : []);
+  if (!hit) return;
+  const arrivals = new Set(clocksIn(spec.brief).filter((item) => item.arrival).map((item) => item.time));
+  if (spec.outbound?.time && !arrivals.has(spec.outbound.time)) return;
+  const city = spec.city === "未写明的目的地" ? null : spec.city;
+  const from = spec.outbound?.from ?? spec.origin;
+  const to = spec.outbound?.to ?? city;
+  if (!from || !to || from === to) return;
+  spec.outbound = {
+    date: spec.outbound?.date ?? spec.startDate,
+    time: hit.time,
+    arriveTime: spec.outbound?.arriveTime ?? null,
+    mode: spec.outbound?.mode ?? modeOf(spec.brief),
+    from,
+    to,
+  };
+}
+
+/** Drop a return clock the user never stated, including one that only copies 「X点到」. */
+function alignReturnHonesty(spec: DraftSpec): void {
+  const stated = statedReturnClock(spec.brief);
+  if (refusesReturn(spec.brief) && !stated) {
+    spec.inbound = null;
+    return;
+  }
+  if (stated) {
+    const city = spec.city === "未写明的目的地" ? null : spec.city;
+    const mode = spec.inbound?.mode ?? spec.outbound?.mode ?? modeOf(spec.brief);
+    if (!spec.inbound && spec.origin && city && city !== spec.origin) {
+      spec.inbound = {
+        date: spec.startDate ? addDays(spec.startDate, Math.max(0, spec.days - 1)) : null,
+        time: stated,
+        mode,
+        from: city,
+        to: spec.origin,
+      };
+      return;
+    }
+    if (spec.inbound) spec.inbound = { ...spec.inbound, time: stated, mode: spec.inbound.mode ?? mode };
+    return;
+  }
+  if (returnWordIndex(spec.brief) < 0) {
+    spec.inbound = null;
+    return;
+  }
+  if (spec.inbound?.time) spec.inbound = { ...spec.inbound, time: null };
 }
 
 function attachTransport(spec: DraftSpec, text: string, now: Date): void {
@@ -793,13 +987,13 @@ function attachTransport(spec: DraftSpec, text: string, now: Date): void {
   const origin = spec.origin;
   const city = spec.city;
   if (!origin || city === "未写明的目的地" || city === origin) return;
-  if (!/高铁|动车|飞机|航班|火车|自驾|开车|返程|返回|回来|当天回|当日往返/.test(text)) return;
-  const clocks = clocksIn(text);
+  if (!/高铁|动车|飞机|航班|火车|自驾|开车|返程|返回|回来|当天回|当日往返|出发/.test(text)) return;
+  const clocks = clocksIn(text).filter((hit) => !hit.arrival && !hit.rangeEnd);
   const mode = modeOf(text);
   const goAt = text.search(/高铁|动车|飞机|航班|出发|去往|前往/);
   const backAt = text.search(/返程|返回|回来|当天回|当日往返/);
-  const goTime = goAt >= 0 ? nearestClock(clocks, goAt, text, [backAt]) : null;
-  const backTime = backAt >= 0 ? nearestClock(clocks, backAt, text, [goAt]) : null;
+  const goTime = goAt >= 0 ? nearestClock(clocks, goAt, text, [backAt])?.time ?? null : null;
+  const backTime = backAt >= 0 ? nearestClock(clocks, backAt, text, [goAt])?.time ?? null : null;
   spec.outbound = {
     date: (goAt >= 0 ? dateNear(text, goAt, today, now) : null) ?? spec.startDate,
     time: goTime,
@@ -899,15 +1093,16 @@ function applyClockedVisits(spec: DraftSpec, now: Date): void {
     const existing = spec.fixed.find((item) => sameVisit(item.title, mention.name));
     const date = dateNear(spec.brief, mention.index, today, now) ?? spec.startDate;
     if (existing) {
-      existing.time = clock;
+      existing.time = clock.time;
+      if (clock.rangeEnd) existing.endTime = clock.rangeEnd;
       existing.title = mention.name;
       if (!ERRAND_TITLE.test(existing.title)) existing.type = "景点";
       if (!existing.date) existing.date = date;
     } else {
       spec.fixed.push({
         date,
-        time: clock,
-        endTime: null,
+        time: clock.time,
+        endTime: clock.rangeEnd,
         title: mention.name,
         place: mention.name,
         type: "景点",
@@ -1094,7 +1289,7 @@ export function specFromExtract(extract: ExtractInput, _now = new Date(), ask: s
     spec.days = 3;
     spec.daysAssumed = true;
   }
-  const party = partyFromCount(extract.party);
+  const party = partyFromCount(extract.party ?? statedPartyCount(brief));
   spec.partySummary = party.summary;
   spec.partyInferred = party.inferred;
   spec.interests = extract.interests.slice(0, 8);
@@ -1140,7 +1335,7 @@ function legacyItems(spec: DraftSpec, random: () => string): RoadbookItem[] {
   return Array.from({ length: spec.days }, (_, index) =>
     itemsForDay(spec.city, index + 1, spec.days, random, {
       origin: spec.origin,
-      withReturn: Boolean(spec.origin) && spec.days <= 3,
+      withReturn: wantsInferredReturn({ brief: spec.brief, origin: spec.origin, city: spec.city, days: spec.days }),
       mustVisit: spec.interests[0] ?? spec.landmark,
       used,
       allowRepeat: repeatRequested(spec.brief),
@@ -1155,8 +1350,57 @@ function useLegacy(spec: DraftSpec): boolean {
   return true;
 }
 
-function modeMinutes(mode: DraftLeg["mode"]): number {
-  if (mode === "高铁") return 180;
+/** City centers. Straight-line distance is only a proxy for HSR ride time. */
+const CITY_COORD: Record<string, [number, number]> = {
+  上海: [31.23, 121.47],
+  苏州: [31.3, 120.59],
+  杭州: [30.27, 120.16],
+  嘉兴: [30.75, 120.76],
+  南京: [32.06, 118.8],
+  无锡: [31.49, 120.31],
+  宁波: [29.87, 121.54],
+  合肥: [31.82, 117.23],
+  济南: [36.65, 117.12],
+  泰安: [36.19, 117.09],
+  青岛: [36.07, 120.38],
+  北京: [39.9, 116.41],
+  天津: [39.34, 117.36],
+  石家庄: [38.04, 114.51],
+  郑州: [34.75, 113.63],
+  武汉: [30.59, 114.31],
+  长沙: [28.23, 112.94],
+  广州: [23.13, 113.26],
+  深圳: [22.54, 114.06],
+  成都: [30.57, 104.07],
+  重庆: [29.56, 106.55],
+  西安: [34.34, 108.94],
+  厦门: [24.48, 118.09],
+  福州: [26.07, 119.3],
+};
+
+function haversineKm(a: [number, number], b: [number, number]): number {
+  const rad = Math.PI / 180;
+  const dLat = (b[0] - a[0]) * rad;
+  const dLon = (b[1] - a[1]) * rad;
+  const lat1 = a[0] * rad;
+  const lat2 = b[0] * rad;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return 2 * 6371 * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+/** Short HSR hops are much less than 3 hours. Longer pairs stay above the old flat 180. */
+function hsrMinutes(from: string | null, to: string | null): number | null {
+  if (!from || !to) return null;
+  const start = CITY_COORD[from.replace(/市$/u, "")];
+  const end = CITY_COORD[to.replace(/市$/u, "")];
+  if (!start || !end) return null;
+  const km = haversineKm(start, end);
+  const minutes = km < 150 ? 20 + km * 0.28 : 30 + (km / 220) * 60;
+  return Math.max(25, Math.min(12 * 60, Math.round(minutes / 5) * 5));
+}
+
+function modeMinutes(mode: DraftLeg["mode"], from?: string | null, to?: string | null): number {
+  if (mode === "高铁") return hsrMinutes(from ?? null, to ?? null) ?? 240;
   if (mode === "飞机") return 150;
   if (mode === "自驾") return 240;
   return 120;
@@ -1218,6 +1462,11 @@ function isClimbTitle(title: string): boolean {
 }
 
 function fixedSpan(fixed: DraftFixed): number {
+  if (fixed.time && fixed.endTime) {
+    const start = parseTime(fixed.time);
+    const end = parseTime(fixed.endTime);
+    if (start != null && end != null && end > start) return Math.min(600, Math.max(30, end - start));
+  }
   if (fixed.type === "办事" || ERRAND_TITLE.test(fixed.title)) return 120;
   if ((fixed.type === "景点" || isVisitTitle(fixed)) && isClimbTitle(fixed.title)) return CLIMB_MINUTES;
   return 90;
@@ -1257,18 +1506,31 @@ function linkedInbound(spec: DraftSpec): boolean {
 }
 
 /**
- * Rules/legacy add a return when origin is set and the trip is at most 3 days.
- * An outbound leg (or any other anchor) skips that path, so fill the missing return here.
+ * The legacy template already draws its own return. Anchored drafts need the leg on the spec
+ * so the last evening stays a cutoff. A stated return clock is left untouched.
  */
 function inferReturnIfAnchored(spec: DraftSpec): DraftSpec {
-  if (spec.ask || spec.kind !== "旅游" || useLegacy(spec) || linkedInbound(spec)) return spec;
-  if (!spec.origin || spec.city === "未写明的目的地" || spec.city === spec.origin || spec.days > 3) return spec;
+  if (!wantsInferredReturn({ brief: spec.brief, origin: spec.origin, city: spec.city, days: spec.days })) return spec;
+  if (useLegacy(spec)) return spec;
+  const mode = spec.inbound?.mode ?? spec.outbound?.mode ?? null;
+  if (linkedInbound(spec) && spec.inbound) {
+    return {
+      ...spec,
+      inbound: {
+        ...spec.inbound,
+        time: null,
+        mode,
+        from: spec.inbound.from ?? spec.city,
+        to: spec.inbound.to ?? spec.origin,
+      },
+    };
+  }
   return {
     ...spec,
     inbound: {
       date: spec.startDate ? addDays(spec.startDate, spec.days - 1) : null,
       time: null,
-      mode: spec.outbound?.mode ?? null,
+      mode,
       from: spec.city,
       to: spec.origin,
     },
@@ -1286,7 +1548,17 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
   const pushLeg = (leg: DraftLeg, day: number, title: string, place: string, statedTime = Boolean(leg.time)) => {
     if (selfTrip(title)) return;
     const time = leg.time ?? "08:00";
-    const duration = clampDuration(time, modeMinutes(leg.mode));
+    const ride = modeMinutes(leg.mode, leg.from, leg.to);
+    let duration = clampDuration(time, ride);
+    let arriveNote = "";
+    if (leg === spec.outbound && leg.time && leg.arriveTime) {
+      const arrive = parseTime(leg.arriveTime);
+      const startMin = parseTime(time);
+      if (arrive != null && startMin != null && arrive > startMin) {
+        duration = clampDuration(time, Math.max(ride, arrive - startMin));
+        arriveNote = `到达 ${leg.arriveTime}。`;
+      }
+    }
     items.push(
       item(random, {
         dayIndex: day,
@@ -1296,13 +1568,13 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
         place,
         type: "交通",
         status: "待做",
-        travelEstimateMinutes: modeMinutes(leg.mode),
+        travelEstimateMinutes: ride,
         estimateSource: "推断",
         locked: statedTime,
         priority: "必去",
         indoor: true,
         note: statedTime
-          ? "来自你的原话。时长是估计，班次和到达时间请自己查。路书不代订。"
+          ? `来自你的原话。${arriveNote}时长是估计，班次和到达时间请自己查。路书不代订。`
           : "时间推断。原话没写钟点，先放在这个时间。时长是估计，班次请自己查。路书不代订。",
         source: statedTime ? statedSource() : inferredSource("时间推断"),
       }),
@@ -1357,9 +1629,17 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
     const to = spec.inbound.to ?? spec.origin;
     if (from && to && from !== to) {
       const day = dayIndexFor(spec.inbound.date ?? (spec.startDate ? addDays(spec.startDate, days - 1) : null), start, days);
-      const statedTime = Boolean(spec.inbound.time);
-      const time = spec.inbound.time ?? "18:00";
-      pushLeg({ ...spec.inbound, time }, day, `从${from}前往${to}`, from, statedTime);
+      const statedClock = statedReturnClock(spec.brief);
+      const stated = Boolean(statedClock && spec.inbound.time === statedClock);
+      const time = stated ? spec.inbound.time ?? "18:00" : "18:00";
+      if (stated) {
+        pushLeg({ ...spec.inbound, time }, day, `从${from}前往${to}`, from, true);
+      } else {
+        const ride = inferredReturnItem(random, day, to, from, spec.inbound.mode ?? spec.outbound?.mode ?? null);
+        items.push(ride);
+        const startMin = parseTime(ride.startTime) ?? 18 * 60;
+        inboundMark.push({ day, start: startMin });
+      }
       const depart = parseTime(time);
       if (depart != null && depart - 60 >= DAY_START) {
         const buffer = depart - 60;
@@ -1774,6 +2054,17 @@ export function buildDraftFromSpec(spec: DraftSpec, options: DraftOptions): Road
       detail: ready.paceInferred ? "路程分钟数是推断，不是导航" : "从你的原话读出",
     }),
   ];
+  if (wantsInferredReturn({ brief: ready.brief, origin: ready.origin, city: ready.city, days: ready.days })) {
+    assumptions.push(
+      assumption(random, {
+        key: "return",
+        label: "返程",
+        value: `没写，按第 ${ready.days} 天傍晚估`,
+        inferred: true,
+        detail: INFERRED_RETURN_NOTE,
+      }),
+    );
+  }
   const createdAt = now.toISOString();
   const question = ready.ask
     ? { id: "city", prompt: ready.ask }

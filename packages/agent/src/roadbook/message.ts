@@ -1,5 +1,5 @@
 import { citiesInText } from "@lushu/tools/place";
-import { buildDraft, itemsForDay, repeatRequested } from "./draft";
+import { buildDraft, itemsForDay, repeatRequested, wantsInferredReturn } from "./draft";
 import { parseZhNumber } from "../parse";
 import { projectPatch } from "./patch";
 import { formatTime, inferStartDate, inferWeekdayDate, isUnsetWhen, parseTime } from "./time";
@@ -78,7 +78,7 @@ function tripOrigin(book: Roadbook): string | null {
 
 function intercityLegs(book: Roadbook): RoadbookItem[] {
   return book.items
-    .filter((item) => item.type === "交通" && item.title.startsWith("从"))
+    .filter((item) => item.type === "交通" && (item.title.startsWith("从") || item.title.startsWith("返回") || item.title.startsWith("到达")))
     .sort((a, b) => a.dayIndex - b.dayIndex || (parseTime(a.startTime) ?? 0) - (parseTime(b.startTime) ?? 0));
 }
 
@@ -90,6 +90,8 @@ function returnLeg(book: Roadbook): RoadbookItem | undefined {
     const paired = legs.find((item) => item.dayIndex === station.dayIndex && (parseTime(item.startTime) ?? 0) >= stationStart);
     if (paired) return paired;
   }
+  const named = [...legs].reverse().find((item) => item.title.startsWith("返回"));
+  if (named) return named;
   if (legs.length >= 2) return legs[legs.length - 1];
   return legs.find((item) => /返回|返程/.test(`${item.title}${item.note ?? ""}`));
 }
@@ -210,7 +212,7 @@ function rebuildForDayCount(
     const dayLocked = lockedKeep.filter((item) => item.dayIndex === day);
     for (const entry of itemsForDay(book.city, day, days, next, {
       origin,
-      withReturn: Boolean(origin) && days <= 3,
+      withReturn: wantsInferredReturn({ brief: book.brief, origin, city: book.city, days }),
       mustVisit: landmark,
       used,
       allowRepeat: repeatRequested(book.brief),
@@ -287,10 +289,9 @@ function parseMoveClock(raw: string): string | null {
   return clock(String(hour), point[2]);
 }
 
-function userMayRetimed(book: Roadbook, item: RoadbookItem): boolean {
-  if (!item.locked) return true;
-  if (item.type === "办事") return true;
-  return returnLeg(book)?.id === item.id;
+/** A named retime is the user's own edit, including a locked sight. Rain and rearrange still leave locks alone. */
+function userMayRetimed(_book: Roadbook, _item: RoadbookItem): boolean {
+  return true;
 }
 
 function matchTripDays(raw: string): number | null | undefined {
@@ -456,7 +457,7 @@ export function planAssumptionEdit(
   if (!current) return { request: null, note: "没有这条假设。" };
   const value = rawValue.trim().slice(0, 80);
   if (!value) return { request: null, note: "假设不能为空。" };
-  const assumptions = book.assumptions.map((item) =>
+  let assumptions = book.assumptions.map((item) =>
     item.id === assumptionId ? { ...item, value, inferred: false, detail: "已手动修改" } : { ...item },
   );
   const ops: PatchOp[] = [];
@@ -477,6 +478,13 @@ export function planAssumptionEdit(
       droppedManual = rebuilt.droppedManual;
     }
     title = book.title.replace(/\d+\s*天/, `${days} 天`);
+    assumptions = assumptions.map((item) => {
+      if (item.key !== "return" || !item.inferred) return item;
+      if (wantsInferredReturn({ brief: book.brief, origin: tripOrigin(book), city: book.city, days })) {
+        return { ...item, value: `没写，按第 ${days} 天傍晚估` };
+      }
+      return { ...item, value: "这次不补", inferred: false, detail: "超过短途，不再补返程" };
+    });
   }
   let startDate: string | undefined;
   if (current.key === "when") {

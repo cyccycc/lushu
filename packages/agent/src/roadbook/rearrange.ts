@@ -46,6 +46,10 @@ function isStationRun(item: RoadbookItem): boolean {
   return item.title === "去车站";
 }
 
+function isReturnRide(item: RoadbookItem): boolean {
+  return item.type === "交通" && item.title.startsWith("返回");
+}
+
 export function planLate(book: Roadbook, now = new Date()): Plan {
   const target = targetDayIndex(book, now);
   const nowMinutes = shanghaiMinutes(now);
@@ -57,6 +61,7 @@ export function planLate(book: Roadbook, now = new Date()): Plan {
       item.status === "待做" &&
       !item.locked &&
       !isStationRun(item) &&
+      !isReturnRide(item) &&
       stillOpen(item, nowMinutes, !target.outOfRange),
   );
   const prefix = target.outOfRange ? "今天不在行程日期里，已按第 1 天试算。" : "";
@@ -97,7 +102,7 @@ export function planLate(book: Roadbook, now = new Date()): Plan {
       cutoff == null
         ? []
         : projected.items.filter((item) => {
-            if (item.dayIndex !== target.dayIndex || item.locked || isStationRun(item)) return false;
+            if (item.dayIndex !== target.dayIndex || item.locked || isStationRun(item) || isReturnRide(item)) return false;
             const start = parseTime(item.startTime);
             return start != null && start >= cutoff;
           });

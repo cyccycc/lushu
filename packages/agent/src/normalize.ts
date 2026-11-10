@@ -98,6 +98,14 @@ function coerceSources(raw: unknown, allowed: Set<string>): Source[] {
   return sources.slice(0, 12);
 }
 
+function withStatedBudget(note: string, amount: number | null): string {
+  if (amount == null || !Number.isFinite(amount) || amount <= 0) return note;
+  const digits = String(Math.round(amount));
+  if (note.replace(/[,，\s]/g, "").includes(digits)) return note;
+  const base = note.trim();
+  return base ? `${base}（预算 ¥${digits}）` : `预算 ¥${digits}。这不是报价，路书不代订。`;
+}
+
 function withWarnings(warnings: string[]): string[] {
   const next = [...warnings];
   if (!next.some((line) => line.includes("AI"))) {
@@ -145,7 +153,7 @@ export function coercePlan(
       : [];
     if (days.length === 0) return;
     const sources = coerceSources(row.sources, allowed);
-    const budget = text(row.budgetNote, 800);
+    const budget = withStatedBudget(text(row.budgetNote, 800), spec.budgetAmountCny);
     variants.push({
       id: text(row.id, 12) || (index === 0 ? "a" : "b"),
       title: text(row.title, 40) || `方案 ${index + 1}`,

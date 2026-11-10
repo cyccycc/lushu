@@ -365,7 +365,7 @@ function applyOps(items: RoadbookItem[], ops: PatchOp[], touched: Set<string>): 
 function readAssumptions(value: Assumption[] | undefined): Assumption[] | string | undefined {
   if (value == null) return undefined;
   if (!Array.isArray(value) || value.length > 12) return "假设标签无效。";
-  const keys = new Set(["city", "days", "party", "when", "origin", "pace", "budget"]);
+  const keys = new Set(["city", "days", "party", "when", "origin", "pace", "budget", "return"]);
   return value.map((item) => {
     if (!item || typeof item !== "object") throw new Error("假设标签无效。");
     if (typeof item.id !== "string" || typeof item.label !== "string" || typeof item.value !== "string") {

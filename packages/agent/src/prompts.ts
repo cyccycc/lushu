@@ -102,7 +102,7 @@ export function synthUserPrompt(input: {
 - variants 恰好 2 套。
 - 若需求含【已确认假设】，出发或到达、天数、人数和硬性安排以该段为准，不要改写成另一种。
 - 每套 days 的长度等于需求天数，每天 2 到 4 个 items。
-- 每套都有非空 budgetNote 和至少 1 条 sources。
+- 每套都有非空 budgetNote 和至少 1 条 sources。budgetNote 必须写出需求里的阿拉伯数字金额（例如 2000、800），不要只写两千或八百。
 - kind 只能是 search、weather、stub、model、local。
 - 不要引导付款或下单。
 

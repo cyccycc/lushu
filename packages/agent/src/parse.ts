@@ -207,6 +207,16 @@ function extractParty(brief: string): Party {
   return { summary: "人数没写清，按 2 人估算", count: 2, kind: "unknown" };
 }
 
+/** A count the brief actually wrote, such as 两个人 or 三人. The default 2 is not stated. */
+export function statedPartyCount(brief: string): number | null {
+  if (!/(?:[0-9一二两俩三四五六七八九十]\s*个?人|一家\s*[0-9一二两三四五六七八九十]\s*口|独自|单人)/.test(brief)) {
+    return null;
+  }
+  const party = extractParty(brief);
+  if (party.kind === "unknown" || party.count == null) return null;
+  return party.count;
+}
+
 function extractThemes(brief: string, destinations: string[], budgetTight: boolean): Theme[] {
   const themes = new Set<Theme>();
   for (const rule of THEME_RULES) {

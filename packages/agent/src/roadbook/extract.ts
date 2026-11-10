@@ -1,6 +1,7 @@
 import { chatComplete, type LlmEnv } from "@lushu/llm";
 import { isVaguePlaceName, matchTravelRoute, resolvePlaceToken } from "@lushu/tools/place";
 import { extractJson } from "../json";
+import { statedPartyCount } from "../parse";
 import { foldUnclockedVisits } from "./draft";
 import { addDays, daysBetween, shanghaiDate, shanghaiWeekday } from "./time";
 import type { ItemType } from "./types";
@@ -213,7 +214,8 @@ function promptFor(now: Date): string {
 - 只抽取用户明说的内容。没提到的字符串填 null，数组填 []。不要猜人数、预算、节奏，不要规划景点，不要编车次或航班号。
 - fixed 只放两类：办事，或写了具体钟点的约定。体检、开会、会议、面试、出差是办事。没写钟点的办事 time 填 null，仍然留在 fixed，不能只写进 missing。早上、下午不是钟点。
 - 没写钟点的景点、爬山、逛逛不要放进 fixed，写进 interests。写了具体钟点的景点、爬山留在 fixed，time 用 HH:mm，标题用景点名（写泰山，不要写爬泰山）。同一件事不要同时出现在 fixed 和 interests，也不要再写同名或近义项（已有「泰山」就不要再写「爬泰山」或「爬山」）。
-- 「下午3点到」「3点到达」是到达时间。去程写进 outbound.time，返程写进 inbound.time。不要把到达钟点写成景点 fixed。
+- 「下午3点到」「5点到」「3点到达」是到达，不是返程。写进 outbound.time。只有原话里有返程、回来或返回，并且这个钟点是在说返程时，才写 inbound.time。没写返程钟点就让 inbound.time 为 null，不要把到达钟点抄到返程上。
+- 「下午3点到8点」是一段时间，不是到达。fixed.time 是开始，fixed.endTime 是结束。结束钟点沿用前面的下午或晚上，所以下午3点到8点是 15:00 到 20:00，不是 08:00。
 - 说了已订、订好了、已经订了，lodging.booked 就是 true。没提酒店就让 lodging 为 null。
 - 返程没写交通方式时，mode 沿用去程；去程也没写才填 null。
 - kind 只能是「旅游」「办事」「混合」。体检、开会、出差且没说要玩，用「办事」。又办事又玩，用「混合」。只说去玩、爬山，用「旅游」。
@@ -271,6 +273,11 @@ export function validateExtract(extract: TripExtract, now: Date, brief = ""): Va
     interests: extract.interests.slice(0, 8),
     missing: extract.missing.slice(0, 6),
   };
+
+  if (value.party == null) {
+    const counted = statedPartyCount(brief);
+    if (counted != null) value.party = counted;
+  }
 
   value.origin = clip(value.origin, 16);
   value.destination.city = clip(value.destination.city, 16);

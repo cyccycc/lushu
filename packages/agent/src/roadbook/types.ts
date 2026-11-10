@@ -37,7 +37,7 @@ export type RoadbookItem = {
   note?: string;
 };
 
-export type AssumptionKey = "city" | "days" | "party" | "when" | "origin" | "pace" | "budget";
+export type AssumptionKey = "city" | "days" | "party" | "when" | "origin" | "pace" | "budget" | "return";
 
 export type Assumption = {
   id: string;
