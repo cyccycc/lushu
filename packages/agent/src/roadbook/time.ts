@@ -18,25 +18,51 @@ export function formatTime(minutes: number): string {
   return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 }
 
-/** Drop time-of-day wording that disagrees with the clock actually on the calendar. */
-export function noteForPlacedClock(note: string | undefined, startTime: string): string | undefined {
-  if (!note) return note;
-  const start = parseTime(startTime);
-  let text = note.replace(/先放在\s*\d{2}:\d{2}/g, `先放在 ${startTime}`);
-  if (start == null) return text;
-  const morning = start < 12 * 60;
-  if (!morning) {
-    text = text.replace(/单独一天的上午出发。?/g, "");
-    text = text.replace(/早上|上午|凌晨|清晨/g, "");
-  } else if (/晚上|傍晚/.test(text)) {
-    text = text.replace(/晚上|傍晚/g, "");
-  }
-  text = text
+const NEXT_DAY_ARRIVAL = /预计次日\s*\d{1,2}:\d{2}\s*到。?/g;
+const SAME_DAY_LIMIT = 23 * 60 + 30;
+
+function tidyNote(text: string): string {
+  return text
     .replace(/^[，。、\s]+/, "")
     .replace(/，{2,}/g, "，")
     .replace(/。{2,}/g, "。")
     .replace(/\s{2,}/g, " ")
+    .replace(/。\s*。/g, "。")
     .trim();
+}
+
+/**
+ * Drop time-of-day wording that disagrees with the clock actually on the calendar.
+ * When `rideMinutes` is set, also rewrite 「预计次日 HH:MM 到」 from start + ride.
+ * A trip that now finishes by 23:30 loses that sentence.
+ */
+export function noteForPlacedClock(
+  note: string | undefined,
+  startTime: string,
+  rideMinutes?: number | null,
+): string | undefined {
+  if (!note && (rideMinutes == null || rideMinutes <= 0)) return note;
+  const start = parseTime(startTime);
+  let text = (note ?? "").replace(/先放在\s*\d{2}:\d{2}/g, `先放在 ${startTime}`);
+  if (start != null) {
+    const morning = start < 12 * 60;
+    if (!morning) {
+      text = text.replace(/单独一天的上午出发。?/g, "");
+      text = text.replace(/早上|上午|凌晨|清晨/g, "");
+    } else if (/晚上|傍晚/.test(text)) {
+      text = text.replace(/晚上|傍晚/g, "");
+    }
+  }
+  const rewriteArrival = rideMinutes != null && rideMinutes > 0;
+  if (rewriteArrival) text = text.replace(NEXT_DAY_ARRIVAL, "");
+  text = tidyNote(text);
+  if (rewriteArrival && start != null && start + rideMinutes > SAME_DAY_LIMIT) {
+    const arrival = formatTime((start + rideMinutes) % (24 * 60));
+    const sentence = `预计次日 ${arrival} 到`;
+    if (!text) return `${sentence}。`;
+    const glue = text.endsWith("。") || text.endsWith("，") ? "" : "。";
+    text = `${text}${glue}${sentence}。`;
+  }
   return text;
 }
 

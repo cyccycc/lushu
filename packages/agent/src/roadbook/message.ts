@@ -1,8 +1,17 @@
 import { citiesInText } from "@lushu/tools/place";
-import { buildDraft, itemsForDay, repeatRequested, returnAssumptionValue, wantsInferredReturn } from "./draft";
+import {
+  buildDraft,
+  fitInferredReturn,
+  itemsForDay,
+  repeatRequested,
+  returnAssumptionValue,
+  returnEarliestMinute,
+  statedReturnClock,
+  wantsInferredReturn,
+} from "./draft";
 import { parseZhNumber } from "../parse";
 import { projectPatch } from "./patch";
-import { formatTime, inferStartDate, inferWeekdayDate, isUnsetWhen, parseTime } from "./time";
+import { formatTime, inferStartDate, inferWeekdayDate, isUnsetWhen, noteForPlacedClock, parseTime } from "./time";
 import type { PatchOp, Plan, Roadbook, RoadbookItem } from "./types";
 
 const REGEN_NOTICE = "未锁定的改动已重排。";
@@ -139,11 +148,66 @@ function fillerItem(
   };
 }
 
+function briefHasReturnWords(brief: string): boolean {
+  if (/不回来|不返回|不返程/.test(brief)) return false;
+  return /返程|回来|返回|回程|当天回|当日往返|当日回/.test(brief);
+}
+
+function returnIsExplicit(book: Roadbook, item: RoadbookItem | undefined): boolean {
+  if (!item) return false;
+  if (item.locked) return true;
+  if (item.note?.includes("来自你的原话")) return true;
+  return statedReturnClock(book.brief) != null;
+}
+
+/** Unlocked inferred returns exist only while the trip is still a short hop and the brief never mentioned coming back. */
+function dropInferredReturn(book: Roadbook, back: RoadbookItem | undefined, days: number): boolean {
+  if (!back || returnIsExplicit(book, back)) return false;
+  if (briefHasReturnWords(book.brief)) return false;
+  return days > 3;
+}
+
+function rangesOverlap(start: number, duration: number, otherStart: number, otherDuration: number): boolean {
+  return start < otherStart + otherDuration && start + duration > otherStart;
+}
+
+function hitsCutoff(item: RoadbookItem, cutoff: number): boolean {
+  const start = parseTime(item.startTime);
+  if (start == null) return false;
+  return start >= cutoff || start + item.durationMinutes > cutoff;
+}
+
+function lockedBlocksReturn(item: RoadbookItem, cutoff: number, returnStart: number, ride: number): boolean {
+  const start = parseTime(item.startTime);
+  if (start == null) return false;
+  if (start >= cutoff || start >= returnStart) return true;
+  return rangesOverlap(start, item.durationMinutes, cutoff, Math.max(60, returnStart - cutoff)) || rangesOverlap(start, item.durationMinutes, returnStart, ride);
+}
+
+function chooseInferredReturnStart(current: number, ride: number, locked: RoadbookItem[]): number | null {
+  const conflicts = (start: number) => {
+    const cutoff = start >= 60 ? start - 60 : start;
+    return locked.some((item) => lockedBlocksReturn(item, cutoff, start, ride));
+  };
+  if (!conflicts(current)) return current;
+  const earliest = returnEarliestMinute(locked);
+  const fitted = fitInferredReturn(ride, earliest).start;
+  if (!conflicts(fitted)) return fitted;
+  const fallback = 18 * 60;
+  if (fallback !== fitted && !conflicts(fallback)) return fallback;
+  return null;
+}
+
+function stationFor(book: Roadbook, back: RoadbookItem | undefined): RoadbookItem | undefined {
+  if (!back) return stationItem(book);
+  return stationItem(book, back.dayIndex) ?? stationItem(book);
+}
+
 function rebuildErrandDays(
   book: Roadbook,
   days: number,
   random?: () => string,
-): { ops: PatchOp[]; droppedManual: boolean } {
+): { ops: PatchOp[]; droppedManual: boolean; error?: string } {
   const next = random ?? (() => Math.random().toString(36).slice(2, 8));
   const manual = manuallyTouchedIds(book);
   const added = userAddedIds(book);
@@ -163,9 +227,38 @@ function rebuildErrandDays(
     else if (added.has(item.id) && item.type !== "景点" && item.dayIndex <= days) remember(item, item.dayIndex);
   }
   if (outbound) remember(outbound, Math.min(outbound.dayIndex, days));
-  if (back && !back.locked) remember(back, days);
-  const station = book.items.find((item) => item.title === "去车站");
-  if (station) remember(station, back && !back.locked ? days : Math.min(station.dayIndex, days));
+  const dropReturn = dropInferredReturn(book, back, days);
+  const station = stationFor(book, back);
+  if (back && !dropReturn) remember(back, days);
+  if (station && !dropReturn) remember(station, back ? days : Math.min(station.dayIndex, days));
+  const timeEdits = new Map<string, string>();
+  const durationEdits = new Map<string, number>();
+  if (back && !dropReturn && !returnIsExplicit(book, back)) {
+    const ride = back.travelEstimateMinutes ?? back.durationMinutes;
+    const onDay = book.items.filter((item) => keep.get(item.id) === days && item.locked && item.type !== "交通");
+    const current = parseTime(back.startTime) ?? 18 * 60;
+    const start = chooseInferredReturnStart(current, ride, onDay);
+    if (start == null) {
+      const cutoff = current >= 60 ? current - 60 : current;
+      const blocker = onDay.find((item) => lockedBlocksReturn(item, cutoff, current, ride));
+      const name = blocker?.title ?? "锁定安排";
+      return { ops: [], droppedManual: false, error: `返程和已锁定的「${name}」撞在一起，没能排开。` };
+    }
+    if (start !== current) {
+      timeEdits.set(back.id, formatTime(start));
+      if (station && keep.has(station.id) && start >= 60) timeEdits.set(station.id, formatTime(start - 60));
+    }
+    const cutoff = start >= 60 ? start - 60 : start;
+    for (const item of book.items) {
+      if (keep.get(item.id) !== days || item.locked) continue;
+      if (item.id === back.id || item.id === station?.id) continue;
+      if (!hitsCutoff(item, cutoff)) continue;
+      const itemStart = parseTime(item.startTime) ?? 0;
+      const room = cutoff - itemStart;
+      if (itemStart < cutoff && room >= 30) durationEdits.set(item.id, room);
+      else keep.delete(item.id);
+    }
+  }
 
   const ops: PatchOp[] = [];
   for (const item of book.items) {
@@ -173,7 +266,17 @@ function rebuildErrandDays(
   }
   for (const [id, dayIndex] of keep) {
     const prev = book.items.find((item) => item.id === id);
-    if (prev && prev.dayIndex !== dayIndex) ops.push({ op: "update", id, fields: { dayIndex } });
+    if (!prev) continue;
+    const startTime = timeEdits.get(id);
+    const fields: { dayIndex?: number; startTime?: string; durationMinutes?: number } = {};
+    if (prev.dayIndex !== dayIndex) fields.dayIndex = dayIndex;
+    if (startTime && startTime !== prev.startTime) fields.startTime = startTime;
+    const shorter = durationEdits.get(id);
+    if (shorter != null && shorter !== prev.durationMinutes) fields.durationMinutes = shorter;
+    if (fields.dayIndex == null && fields.startTime == null && fields.durationMinutes == null) continue;
+    if (prev.locked) ops.push({ op: "update", id, fields: { locked: false } });
+    ops.push({ op: "update", id, fields });
+    if (prev.locked) ops.push({ op: "update", id, fields: { locked: true } });
   }
   for (let day = 1; day <= days; day += 1) {
     const present = book.items.some((item) => keep.get(item.id) === day);
@@ -187,11 +290,39 @@ function rebuildErrandDays(
   };
 }
 
+function retargetGeneratedReturn(entries: RoadbookItem[], locked: RoadbookItem[], day: number): string | null {
+  const rideItem = entries.find((item) => item.dayIndex === day && item.title.startsWith("返回"));
+  if (!rideItem) return null;
+  const ride = rideItem.travelEstimateMinutes ?? rideItem.durationMinutes;
+  const blocks = locked.filter((item) => item.dayIndex === day && item.type !== "交通");
+  const current = parseTime(rideItem.startTime) ?? 18 * 60;
+  const start = chooseInferredReturnStart(current, ride, blocks);
+  if (start == null) {
+    const name = blocks.find((item) => lockedBlocksReturn(item, current >= 60 ? current - 60 : current, current, ride))?.title ?? "锁定安排";
+    return `返程和已锁定的「${name}」撞在一起，没能排开。`;
+  }
+  if (start !== current) {
+    rideItem.startTime = formatTime(start);
+    const note = noteForPlacedClock(rideItem.note, rideItem.startTime, ride);
+    if (note !== rideItem.note) rideItem.note = note;
+  }
+  const station = entries.find((item) => item.dayIndex === day && item.title === "去车站");
+  if (station && start >= 60) station.startTime = formatTime(start - 60);
+  const cutoff = start >= 60 ? start - 60 : start;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (!entry || entry.dayIndex !== day || entry.id === rideItem.id || entry.id === station?.id) continue;
+    if (!hitsCutoff(entry, cutoff)) continue;
+    entries.splice(index, 1);
+  }
+  return null;
+}
+
 function rebuildForDayCount(
   book: Roadbook,
   days: number,
   random?: () => string,
-): { ops: PatchOp[]; droppedManual: boolean } {
+): { ops: PatchOp[]; droppedManual: boolean; error?: string } {
   const manual = manuallyTouchedIds(book);
   const added = userAddedIds(book);
   const lockedKeep = book.items.filter((item) => item.locked && item.dayIndex <= days);
@@ -200,6 +331,9 @@ function rebuildForDayCount(
   );
   if (bookKind(book) !== "旅游") return rebuildErrandDays(book, days, random);
   const origin = tripOrigin(book);
+  const existingReturn = returnLeg(book);
+  const dropReturn = dropInferredReturn(book, existingReturn, days);
+  const explicitReturn = returnIsExplicit(book, existingReturn);
   const landmark = citiesInText(book.brief).find((hit) => hit.city === book.city)?.landmark ?? null;
   const next = random ?? (() => Math.random().toString(36).slice(2, 8));
   const keptSights = book.items.filter((item) => item.type === "景点" && item.dayIndex >= 1 && item.dayIndex <= days);
@@ -214,7 +348,10 @@ function rebuildForDayCount(
     const daySights = keptSights.filter((item) => item.dayIndex === day);
     for (const entry of itemsForDay(book.city, day, days, next, {
       origin,
-      withReturn: wantsInferredReturn({ brief: book.brief, origin, city: book.city, days }),
+      withReturn:
+        !dropReturn &&
+        !explicitReturn &&
+        wantsInferredReturn({ brief: book.brief, origin, city: book.city, days }),
       mustVisit: landmark,
       used,
       allowRepeat: repeatRequested(book.brief),
@@ -222,8 +359,19 @@ function rebuildForDayCount(
       if (dayLocked.some((item) => item.title === entry.title)) continue;
       if (daySights.length > 0 && (entry.type === "景点" || entry.title === "自由活动")) continue;
       if (entry.type !== "交通" && overlapsLocked(entry.startTime, entry.durationMinutes, daySights)) continue;
-      if (overlapsLocked(entry.startTime, entry.durationMinutes, dayLocked)) continue;
+      const returnTransport = entry.title === "去车站" || entry.title.startsWith("返回");
+      if (!returnTransport && overlapsLocked(entry.startTime, entry.durationMinutes, dayLocked)) continue;
       generated.push(entry);
+    }
+  }
+  const retargetError = retargetGeneratedReturn(generated, lockedKeep, days);
+  if (retargetError) return { ops: [], droppedManual: false, error: retargetError };
+  const fitted = generated.find((item) => item.dayIndex === days && item.title.startsWith("返回"));
+  if (fitted) {
+    const cutoff = (parseTime(fitted.startTime) ?? 0) - 60;
+    for (const sight of keptSights) {
+      if (sight.locked || sight.dayIndex !== days) continue;
+      if (hitsCutoff(sight, cutoff)) keptSightIds.delete(sight.id);
     }
   }
 
@@ -253,10 +401,30 @@ function rebuildForDayCount(
   }
 
   const preservedIds = new Set(preserved.map((item) => item.id));
+  const keptTransport = new Set<string>();
+  const keptStation = explicitReturn && existingReturn ? stationFor(book, existingReturn) : undefined;
+  if (explicitReturn && existingReturn) {
+    keptTransport.add(existingReturn.id);
+    if (keptStation) keptTransport.add(keptStation.id);
+  }
+  const moveKeptTransport = (ops: PatchOp[]) => {
+    if (!explicitReturn || !existingReturn) return;
+    if (existingReturn.dayIndex !== days) {
+      if (existingReturn.locked) ops.push({ op: "update", id: existingReturn.id, fields: { locked: false } });
+      ops.push({ op: "update", id: existingReturn.id, fields: { dayIndex: days } });
+      if (existingReturn.locked) ops.push({ op: "update", id: existingReturn.id, fields: { locked: true } });
+    }
+    if (keptStation && keptStation.dayIndex !== days) {
+      ops.push({ op: "update", id: keptStation.id, fields: { dayIndex: days } });
+    }
+  };
   const pack = (keepIds: Set<string>, additions: RoadbookItem[]) => {
-    const removed = book.items.filter((item) => !item.locked && !keepIds.has(item.id) && !keptSightIds.has(item.id));
+    const removed = book.items.filter(
+      (item) => !item.locked && !keepIds.has(item.id) && !keptSightIds.has(item.id) && !keptTransport.has(item.id),
+    );
     const ops: PatchOp[] = removed.map((item) => ({ op: "remove", id: item.id }));
     for (const entry of additions) ops.push({ op: "add", item: entry });
+    moveKeptTransport(ops);
     return { removed, ops };
   };
   const withKept = pack(preservedIds, keptGenerated);
@@ -326,6 +494,54 @@ function resolveWhenStart(value: string, now: Date): string | null {
   if (weekday) return weekday;
   if (/今天|今日|今晚|明天|明日|后天/.test(value)) return inferStartDate(value, now);
   return null;
+}
+
+function planReturnClock(book: Roadbook, item: RoadbookItem, startTime: string): Plan {
+  const startMin = parseTime(startTime);
+  if (startMin == null) return { request: null, note: "这个时间无法解析。" };
+  const cutoff = startMin >= 60 ? startMin - 60 : startMin;
+  const station = stationItem(book, item.dayIndex) ?? stationItem(book);
+  const dayItems = book.items.filter(
+    (entry) => entry.dayIndex === item.dayIndex && entry.id !== item.id && entry.id !== station?.id,
+  );
+  const blocked = dayItems.filter((entry) => entry.locked && hitsCutoff(entry, cutoff));
+  if (blocked.length > 0) {
+    const names = blocked.map((entry) => entry.title).join("、");
+    return { request: null, note: `「${names}」已锁定，和 ${startTime} 的返程冲突，这次没有改。` };
+  }
+  const dropped: string[] = [];
+  const ops: PatchOp[] = [];
+  for (const entry of dayItems) {
+    if (entry.locked || !hitsCutoff(entry, cutoff)) continue;
+    const entryStart = parseTime(entry.startTime) ?? 0;
+    const room = cutoff - entryStart;
+    if (entryStart < cutoff && room >= 30) {
+      ops.push({ op: "update", id: entry.id, fields: { durationMinutes: room } });
+      continue;
+    }
+    dropped.push(entry.title);
+    ops.push({ op: "remove", id: entry.id });
+  }
+  if (item.locked) ops.push({ op: "update", id: item.id, fields: { locked: false } });
+  ops.push({ op: "update", id: item.id, fields: { startTime } });
+  ops.push({ op: "update", id: item.id, fields: { locked: true } });
+  if (station && startMin >= 60) {
+    const stationTime = formatTime(startMin - 60);
+    if (station.startTime !== stationTime) ops.push({ op: "update", id: station.id, fields: { startTime: stationTime } });
+  }
+  const note =
+    dropped.length > 0
+      ? `「${item.title}」改到 ${startTime}。已拿掉${dropped.join("、")}。`
+      : `「${item.title}」改到 ${startTime}。`;
+  return {
+    request: {
+      label: `${item.title}改到${startTime}`,
+      kind: "user",
+      ops,
+      statusNote: note,
+    },
+    note,
+  };
 }
 
 export function planMessage(book: Roadbook, text: string, random?: () => string, now = new Date()): Plan {
@@ -402,23 +618,17 @@ export function planMessage(book: Roadbook, text: string, random?: () => string,
     if (!userMayRetimed(book, item)) return { request: null, note: `「${item.title}」已锁定，不能改。` };
     const startTime = parseMoveClock(move[2]);
     if (!startTime) return { request: null, note: "这个时间无法解析。" };
+    if (returnLeg(book)?.id === item.id) return planReturnClock(book, item, startTime);
     const ops: PatchOp[] = [];
     if (item.locked) ops.push({ op: "update", id: item.id, fields: { locked: false } });
     ops.push({ op: "update", id: item.id, fields: { startTime } });
     if (item.locked) ops.push({ op: "update", id: item.id, fields: { locked: true } });
-    if (returnLeg(book)?.id === item.id) {
-      const startMin = parseTime(startTime);
-      const station = stationItem(book, item.dayIndex) ?? stationItem(book);
-      if (station && startMin != null && startMin >= 60) {
-        ops.push({ op: "update", id: station.id, fields: { startTime: formatTime(startMin - 60) } });
-      }
-    }
     return {
       request: {
         label: `${item.title}改到${startTime}`,
         kind: "user",
         ops,
-        statusNote: `「${item.title}」改到 ${startTime}。重叠的项会顺一下。`,
+        statusNote: `「${item.title}」改到 ${startTime}。`,
       },
       note: `「${item.title}」改到 ${startTime}。`,
     };
@@ -474,23 +684,36 @@ export function planAssumptionEdit(
     const maxDay = book.items.reduce((max, item) => Math.max(max, item.dayIndex), 1);
     if (days !== maxDay) {
       const back = returnLeg(book);
-      if (back?.locked) return { request: null, note: `返程已锁定在第 ${back.dayIndex} 天，要先改返程吗？` };
-      const blocked = book.items.filter((item) => item.locked && item.dayIndex > days);
+      const lengtheningPastThree = days > 3 && days > maxDay;
+      if (back?.locked && !lengtheningPastThree) {
+        return { request: null, note: `返程已锁定在第 ${back.dayIndex} 天，要先改返程吗？` };
+      }
+      const blocked = book.items.filter((item) => item.locked && item.id !== back?.id && item.dayIndex > days);
       if (blocked.length > 0) return { request: null, note: "多出来的日子里有锁定项，不能缩短。" };
       const rebuilt = rebuildForDayCount(book, days, random);
+      if (rebuilt.error) return { request: null, note: rebuilt.error };
       ops.push(...rebuilt.ops);
       droppedManual = rebuilt.droppedManual;
     }
     title = book.title.replace(/\d+\s*天/, `${days} 天`);
-    const rebuiltReturn = ops.find((op) => op.op === "add" && op.item.type === "交通" && op.item.title.startsWith("返回"));
-    const existingReturn = book.items.find((item) => item.type === "交通" && item.title.startsWith("返回") && !item.locked);
-    const returnClock = rebuiltReturn && rebuiltReturn.op === "add" ? rebuiltReturn.item.startTime : existingReturn?.startTime ?? "18:00";
+    const removed = new Set(ops.filter((op) => op.op === "remove").map((op) => op.id));
+    const addedReturn = ops.find((op) => op.op === "add" && op.item.type === "交通" && op.item.title.startsWith("返回"));
+    const surviving = book.items.find(
+      (item) => (item.title.startsWith("返回") || item.type === "交通") && !removed.has(item.id) && returnLeg(book)?.id === item.id,
+    );
+    const moved = ops.find((op) => op.op === "update" && op.id === surviving?.id && op.fields.startTime);
+    const returnClock =
+      (addedReturn && addedReturn.op === "add" ? addedReturn.item.startTime : null) ??
+      (moved && moved.op === "update" ? moved.fields.startTime : null) ??
+      surviving?.startTime ??
+      "18:00";
+    const stillThere = Boolean(addedReturn) || Boolean(surviving);
     assumptions = assumptions.map((item) => {
       if (item.key !== "return" || !item.inferred) return item;
-      if (wantsInferredReturn({ brief: book.brief, origin: tripOrigin(book), city: book.city, days })) {
-        return { ...item, value: returnAssumptionValue(book.brief, days, returnClock) };
+      if (!stillThere) {
+        return { ...item, value: "这次不补", inferred: false, detail: "超过短途，不再补返程" };
       }
-      return { ...item, value: "这次不补", inferred: false, detail: "超过短途，不再补返程" };
+      return { ...item, value: returnAssumptionValue(book.brief, days, returnClock) };
     });
   }
   let startDate: string | undefined;

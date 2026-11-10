@@ -162,8 +162,19 @@ function lockedUpdateError(item: RoadbookItem, fields: ItemFields): string | nul
   return null;
 }
 
-function rewritePlacedNote(note: string | undefined, startTime: string): string | undefined {
-  return noteForPlacedClock(note, startTime);
+function arrivalRide(item: RoadbookItem): number | undefined {
+  if (item.title.startsWith("返回") || item.note?.includes("预计次日")) {
+    return item.travelEstimateMinutes ?? item.durationMinutes;
+  }
+  return undefined;
+}
+
+function mayCrossMidnight(item: RoadbookItem): boolean {
+  return item.title.startsWith("返回") || Boolean(item.note?.includes("预计次日"));
+}
+
+function rewritePlacedNote(item: RoadbookItem): string | undefined {
+  return noteForPlacedClock(item.note, item.startTime, arrivalRide(item));
 }
 
 function applyFields(item: RoadbookItem, fields: ItemFields): string | null {
@@ -237,9 +248,11 @@ function applyFields(item: RoadbookItem, fields: ItemFields): string | null {
   if (fields.locked != null) item.locked = fields.locked === true;
   if (fields.indoor != null) item.indoor = fields.indoor === true;
   if (fields.note != null) item.note = fields.note.slice(0, 300);
-  if (fields.startTime != null && fields.note == null) {
-    const next = rewritePlacedNote(item.note, item.startTime);
-    if (next != null) item.note = next;
+  const timingChanged =
+    fields.startTime != null || fields.durationMinutes != null || fields.travelEstimateMinutes !== undefined;
+  if (timingChanged && fields.note == null) {
+    const next = rewritePlacedNote(item);
+    if (next !== item.note) item.note = next;
   }
   return null;
 }
@@ -273,12 +286,14 @@ function resolveDay(group: RoadbookItem[], touched: Set<string>): string | null 
       guard += 1;
       if (guard > 16) return `「${item.title}」的时间冲突无法修正。`;
     }
-    if (start + item.durationMinutes >= 24 * 60) return `「${item.title}」超出当天，无法修正。`;
+    if (start + item.durationMinutes >= 24 * 60 && !mayCrossMidnight(item)) {
+      return `「${item.title}」超出当天，无法修正。`;
+    }
     const formatted = formatTime(start);
     if (formatted !== item.startTime) {
       item.startTime = formatted;
-      const next = rewritePlacedNote(item.note, formatted);
-      if (next != null) item.note = next;
+      const next = rewritePlacedNote(item);
+      if (next !== item.note) item.note = next;
       touched.add(item.id);
     }
     placed.push({ start, end: start + item.durationMinutes });
@@ -351,8 +366,8 @@ function applyOps(items: RoadbookItem[], ops: PatchOp[], touched: Set<string>): 
       if (!item || !slot || item.locked) continue;
       if (item.startTime !== slot) {
         item.startTime = slot;
-        const next = rewritePlacedNote(item.note, slot);
-        if (next != null) item.note = next;
+        const next = rewritePlacedNote(item);
+        if (next !== item.note) item.note = next;
         touched.add(item.id);
       }
     }

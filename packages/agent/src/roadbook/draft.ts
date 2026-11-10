@@ -988,7 +988,7 @@ function returnWordIndex(brief: string): number {
 }
 
 /** A return clock the brief actually stated. Arrival clocks that only echo 「X点到」 do not count. */
-function statedReturnClock(brief: string): string | null {
+export function statedReturnClock(brief: string): string | null {
   const backAt = returnWordIndex(brief);
   if (backAt < 0) return null;
   const clocks = clocksIn(brief).filter((hit) => !hit.rangeEnd);
@@ -1572,8 +1572,43 @@ export function specFromExtract(extract: ExtractInput, _now = new Date(), ask: s
     absorbCityLandmarks(spec);
     coerceLeisureKind(spec);
     applyBriefFacts(spec, _now);
+    ensureModelOutbound(spec, _now);
   }
   return spec;
+}
+
+/**
+ * Rules drafts call attachTransport. The model path used to keep a missing outbound,
+ * or a meeting clock written onto that leg, so day 1 had no hop.
+ * Fill only a missing leg. A clock already beside 出发 or a ride word is left alone.
+ */
+function ensureModelOutbound(spec: DraftSpec, now: Date): void {
+  const origin = spec.origin;
+  const city = spec.city;
+  if (!origin || city === "未写明的目的地" || city === origin) return;
+  const text = spec.brief;
+  const clocks = clocksIn(text).filter((hit) => !hit.arrival && !hit.rangeEnd);
+  const goAt = text.search(/高铁|动车|飞机|航班|火车|出发|去往|前往/);
+  const backAt = returnWordIndex(text);
+  const goTime = goAt >= 0 ? nearestClock(clocks, goAt, text, backAt >= 0 ? [backAt] : [])?.time ?? null : null;
+  const goDate = goAt >= 0 ? dateNear(text, goAt, shanghaiDate(now), now) : null;
+  const meetingTimes = new Set(
+    spec.fixed
+      .filter((item) => item.type === "办事" || /开会|会议|体检|面试/.test(item.title))
+      .map((item) => item.time)
+      .filter((time): time is string => Boolean(time)),
+  );
+  const stolen = Boolean(spec.outbound?.time && spec.outbound.time !== goTime && meetingTimes.has(spec.outbound.time));
+  if (spec.outbound && !stolen) return;
+  const previous = spec.outbound;
+  spec.outbound = {
+    date: goDate ?? spec.startDate ?? previous?.date ?? null,
+    time: goTime,
+    arriveTime: previous?.arriveTime ?? null,
+    mode: previous?.mode ?? modeOf(text),
+    from: previous?.from ?? origin,
+    to: previous?.to ?? city,
+  };
 }
 
 export function specForQuestion(brief: string, ask: string): DraftSpec {
@@ -1696,8 +1731,20 @@ function modeMinutes(mode: DraftLeg["mode"], from?: string | null, to?: string |
   return 120;
 }
 
+/** Minutes after locked blocks, plus the hour needed to reach the station. */
+export function returnEarliestMinute(locked: { startTime: string; durationMinutes: number }[]): number {
+  let earliest = 0;
+  for (const entry of locked) {
+    const start = parseTime(entry.startTime);
+    if (start == null) continue;
+    const ready = start + entry.durationMinutes + 60;
+    if (ready > earliest) earliest = ready;
+  }
+  return earliest;
+}
+
 /** Latest inferred return that still finishes by 23:30, rounded down to the half hour. */
-function fitInferredReturn(ride: number, earliest: number): { start: number; overflow: boolean } {
+export function fitInferredReturn(ride: number, earliest: number): { start: number; overflow: boolean } {
   const latestFit = RETURN_LIMIT - ride;
   const ideal = Math.floor(Math.min(DEFAULT_RETURN, latestFit) / 30) * 30;
   if (ideal >= earliest && ideal + ride <= RETURN_LIMIT) return { start: ideal, overflow: false };
@@ -1707,28 +1754,14 @@ function fitInferredReturn(ride: number, earliest: number): { start: number; ove
   return { start: fallback, overflow: fallback + ride > RETURN_LIMIT };
 }
 
-function nextDayArrival(start: number, ride: number): string | null {
-  if (start + ride <= RETURN_LIMIT) return null;
-  return `预计次日 ${formatTime((start + ride) % (24 * 60))} 到`;
-}
-
 function withOverflow(note: string, start: number, ride: number): string {
-  const extra = nextDayArrival(start, ride);
-  if (!extra) return note;
-  const glue = note.endsWith("。") || note.endsWith("，") ? "" : "。";
-  return `${note}${glue}${extra}。`;
+  return noteForPlacedClock(note, formatTime(start), ride) ?? note;
 }
 
 function earliestReturnStart(items: RoadbookItem[], day: number): number {
-  let earliest = 0;
-  for (const entry of items) {
-    if (entry.dayIndex !== day || !entry.locked || entry.type === "交通") continue;
-    const start = parseTime(entry.startTime);
-    if (start == null) continue;
-    const ready = start + entry.durationMinutes + 60;
-    if (ready > earliest) earliest = ready;
-  }
-  return earliest;
+  return returnEarliestMinute(
+    items.filter((entry) => entry.dayIndex === day && entry.locked && entry.type !== "交通"),
+  );
 }
 
 function isBreakfastTitle(title: string): boolean {
@@ -1751,7 +1784,13 @@ function dropMisplacedBreakfast(items: RoadbookItem[]): RoadbookItem[] {
     );
     if (ride) {
       const depart = parseTime(ride.startTime);
-      if (depart != null && depart < BREAKFAST_EARLIEST && start >= depart) return false;
+      if (depart != null && depart < BREAKFAST_EARLIEST && start >= depart) {
+        const arrived = depart + ride.durationMinutes;
+        const climbAt = climb ? parseTime(climb.startTime) : null;
+        const beforeClimb = climbAt == null || start < climbAt;
+        if (start >= arrived && start <= BREAKFAST_LATEST && beforeClimb) return true;
+        return false;
+      }
     }
     return true;
   });
@@ -2192,7 +2231,6 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
         const climb = items.find((entry) => entry.dayIndex === day && entry.type === "景点" && isClimbTitle(entry.title));
         return climb ? parseTime(climb.startTime) : null;
       })();
-      const leftBeforeBreakfast = depart != null && depart < BREAKFAST_EARLIEST;
       const breakfastFields = (placeLabel: string) => ({
         dayIndex: day,
         startTime: "09:00",
@@ -2208,7 +2246,7 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
         source: inferredSource(unknown ? "通用模板，地点是推断" : "本地草稿"),
       });
       let ate = false;
-      if (!leftBeforeBreakfast && earliest <= BREAKFAST_LATEST && (climbStart == null || earliest < climbStart)) {
+      if (earliest <= BREAKFAST_LATEST && (climbStart == null || earliest < climbStart)) {
         const cap = climbStart != null ? Math.min(latest, climbStart) : latest;
         const slot = placeFree(items, day, earliest, cap, 9 * 60, 40);
         if (slot != null && slot <= BREAKFAST_LATEST && (climbStart == null || slot < climbStart)) {

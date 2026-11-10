@@ -24,6 +24,7 @@ import {
   buildDraftFromSpec,
   citeRetrievedSights,
   forecastDaysThrough,
+  formatTime,
   normalizeWeatherQuery,
   parseTime,
   planAssumptionEdit,
@@ -2481,15 +2482,21 @@ function assertConfirmedFixes(): string | null {
     if (lateBreakfast) return `${label} 泰山不应把早餐放到 ${lateBreakfast.startTime}`;
     const depart = book.items.find((item) => item.type === "交通" && item.title.includes("前往"));
     const departAt = parseTime(depart?.startTime ?? "") ?? 0;
+    const climb = book.items.find((item) => item.type === "景点" && item.title.includes("泰山"));
+    const climbAt = parseTime(climb?.startTime ?? "") ?? 0;
     const breakfast = book.items.find((item) => item.dayIndex === 1 && item.title.includes("早餐"));
     if (breakfast) {
       const at = parseTime(breakfast.startTime) ?? 0;
-      if (!breakfast.place.includes("济南") || at >= departAt) {
+      if (climbAt >= 9 * 60 + 30) {
+        const arrived = departAt + (depart?.durationMinutes ?? 0);
+        if (at < arrived || at + breakfast.durationMinutes > climbAt) {
+          return `${label} 早餐应在到达之后、开爬之前，得到 ${breakfast.place} ${breakfast.startTime}，爬 ${climb?.startTime}`;
+        }
+      } else if (!breakfast.place.includes("济南") || at >= departAt) {
         return `${label} 早餐应在济南出发前，或这一天不排，得到 ${breakfast.place} ${breakfast.startTime}`;
       }
     }
-    const climb = book.items.find((item) => item.type === "景点" && item.title.includes("泰山"));
-    const climbEnd = climb ? (parseTime(climb.startTime) ?? 0) + climb.durationMinutes : 0;
+    const climbEnd = climb ? climbAt + climb.durationMinutes : 0;
     const after = book.items.filter((item) => item.dayIndex === 1 && item.type === "餐" && (parseTime(item.startTime) ?? 0) >= climbEnd);
     if (after.some((item) => item.title.includes("早餐"))) return `${label} 爬完不应再叫早餐`;
   }
@@ -2582,6 +2589,323 @@ function assertConfirmedFixes(): string | null {
   return null;
 }
 
+function applySpoken(book: Roadbook, text: string, id: string, random: () => string, now: Date): { book: Roadbook; note: string } | string {
+  const plan = planMessage(book, text, random, now);
+  if (!plan.request) return plan.note || `${text} 没有生效`;
+  if (plan.note.includes("重叠的项会顺一下") || (plan.request.statusNote ?? "").includes("重叠的项会顺一下")) {
+    return `${text} 仍说重叠的项会顺一下：${plan.note}`;
+  }
+  const applied = applyPatch(book, { ...plan.request, id });
+  if (!applied.ok) return applied.error;
+  return { book: applied.book, note: plan.note };
+}
+
+function assertUserFixes(): string | null {
+  const now = new Date("2026-11-09T02:00:00.000Z");
+  let n = 0;
+  const random = () => `u${(n += 1)}`;
+  const spillAfter = (book: Roadbook, day: number, cutoff: string, keep: Set<string>) =>
+    book.items.filter((item) => {
+      if (item.dayIndex !== day || keep.has(item.id)) return false;
+      const start = parseTime(item.startTime) ?? 0;
+      return start >= (parseTime(cutoff) ?? 0) || start + item.durationMinutes > (parseTime(cutoff) ?? 0);
+    });
+
+  const wuzhen = buildDraft("周六从杭州去乌镇", { id: "u1-wz", now, random });
+  const museum = wuzhen.items.find((item) => item.title.includes("博物馆"));
+  const wuzhenPlan = applySpoken(wuzhen, "把返程改到16:00", "p_u1_wz", random, now);
+  if (typeof wuzhenPlan === "string") return `乌镇返程：${wuzhenPlan}`;
+  const wuzhenBack = wuzhenPlan.book.items.find((item) => item.title === "返回杭州");
+  const wuzhenStation = wuzhenPlan.book.items.find((item) => item.dayIndex === wuzhenBack?.dayIndex && item.title === "去车站");
+  if (wuzhenBack?.startTime !== "16:00" || !wuzhenBack.locked) {
+    return `乌镇返程应钉在 16:00，得到 ${wuzhenBack?.startTime} locked=${wuzhenBack?.locked}`;
+  }
+  if (wuzhenStation?.startTime !== "15:00") return `乌镇去车站应在 15:00，得到 ${wuzhenStation?.startTime}`;
+  const wuzhenSpill = spillAfter(
+    wuzhenPlan.book,
+    wuzhenBack.dayIndex,
+    "15:00",
+    new Set([wuzhenBack.id, wuzhenStation?.id ?? ""]),
+  );
+  if (wuzhenSpill.length > 0) {
+    return `16:00 返程前不该再压着：${wuzhenSpill.map((item) => `${item.title} ${item.startTime}`).join("、")}`;
+  }
+  const wuzhenRemoved = wuzhen.items.filter((item) => !wuzhenPlan.book.items.some((next) => next.id === item.id));
+  for (const item of wuzhenRemoved) {
+    if (!wuzhenPlan.note.includes(item.title)) return `乌镇提示应点名 ${item.title}：${wuzhenPlan.note}`;
+  }
+  if (museum && wuzhenRemoved.some((item) => item.id === museum.id) && !wuzhenPlan.note.includes("博物馆")) {
+    return `乌镇应点名拿掉博物馆：${wuzhenPlan.note}`;
+  }
+
+  const beijing = buildDraft("从上海去北京玩2天", { id: "u1-bj", now, random });
+  const tiantan = beijing.items.find((item) => item.title.includes("天坛"));
+  const beijingPlan = applySpoken(beijing, "把返程改到14:00", "p_u1_bj", random, now);
+  if (typeof beijingPlan === "string") return `北京返程：${beijingPlan}`;
+  const beijingBack = beijingPlan.book.items.find((item) => item.title === "返回上海");
+  const beijingStation = beijingPlan.book.items.find((item) => item.dayIndex === beijingBack?.dayIndex && item.title === "去车站");
+  if (beijingBack?.startTime !== "14:00" || !beijingBack.locked) {
+    return `北京返程应钉在 14:00，得到 ${beijingBack?.startTime} locked=${beijingBack?.locked}`;
+  }
+  if (beijingStation?.startTime !== "13:00") return `北京去车站应在 13:00，得到 ${beijingStation?.startTime}`;
+  const beijingSpill = spillAfter(
+    beijingPlan.book,
+    beijingBack.dayIndex,
+    "13:00",
+    new Set([beijingBack.id, beijingStation?.id ?? ""]),
+  );
+  if (beijingSpill.length > 0) {
+    return `14:00 返程前不该再压着：${beijingSpill.map((item) => `${item.title} ${item.startTime}`).join("、")}`;
+  }
+  if (tiantan && !beijingPlan.book.items.some((item) => item.id === tiantan.id) && !beijingPlan.note.includes("天坛")) {
+    return `北京提示应点名天坛：${beijingPlan.note}`;
+  }
+  if (beijingPlan.book.items.some((item) => item.title.includes("天坛") && item.dayIndex === beijingBack.dayIndex && (parseTime(item.startTime) ?? 0) >= 13 * 60)) {
+    return "天坛不应留在 14:00 的返程之后";
+  }
+
+  const lockedHost = buildDraft("周六从杭州去乌镇", { id: "u1-lock", now, random });
+  const lockedBack = lockedHost.items.find((item) => item.title === "返回杭州");
+  const lockedSight = lockedHost.items.find((item) => item.type === "景点" && item.dayIndex === lockedBack?.dayIndex);
+  if (!lockedBack || !lockedSight) return "锁定冲突用例缺少返程或景点";
+  const lockedSetup = applyPatch(lockedHost, {
+    id: "p_u1_lock_setup",
+    label: "锁定景点",
+    kind: "user",
+    ops: [
+      { op: "update", id: lockedSight.id, fields: { startTime: "16:00", durationMinutes: 60 } },
+      { op: "update", id: lockedSight.id, fields: { locked: true } },
+    ],
+  });
+  if (!lockedSetup.ok) return `锁定景点失败：${lockedSetup.error}`;
+  const refused = planMessage(lockedSetup.book, "把返程改到16:00", random, now);
+  if (refused.request) return "已锁定的景点挡住返程时，不应改点";
+  if (!refused.note.includes(lockedSight.title) || !refused.note.includes("锁定") || !refused.note.includes("冲突")) {
+    return `锁定冲突的提示不对：${refused.note}`;
+  }
+  if (lockedSetup.book.items.find((item) => item.id === lockedBack.id)?.startTime !== lockedBack.startTime) {
+    return "拒绝改点后返程不应被挪后";
+  }
+
+  const chengduBrief = "下周三到周五从北京去成都出差，周四下午2点开会";
+  const chengdu = buildDraft(chengduBrief, { id: "u2-cd", now, random });
+  const inferred = chengdu.items.find((item) => item.title === "返回北京");
+  if (inferred?.startTime !== "16:00" || inferred.locked || inferred.durationMinutes !== 445) {
+    return `前置推断返程应是未锁定的 16:00 / 445，得到 ${inferred?.startTime} ${inferred?.durationMinutes} locked=${inferred?.locked}`;
+  }
+  const later = applySpoken(chengdu, "把返程改到18:00", "p_u2_18", random, now);
+  if (typeof later === "string") return `成都改到 18:00：${later}`;
+  const laterRide = later.book.items.find((item) => item.id === inferred.id);
+  if (laterRide?.startTime !== "18:00" || laterRide.durationMinutes !== 445 || laterRide.travelEstimateMinutes !== 445) {
+    return `18:00 推断返程应保持 445，得到 ${laterRide?.startTime} ${laterRide?.durationMinutes}/${laterRide?.travelEstimateMinutes}`;
+  }
+  if (!laterRide.note?.includes("预计次日 01:25 到")) return `18:00 应注明预计次日 01:25 到：${laterRide?.note}`;
+  const barEnd = Math.min((parseTime(laterRide.startTime) ?? 0) + laterRide.durationMinutes, 23 * 60 + 59);
+  if (barEnd !== 23 * 60 + 59) return `横条应只画到 23:59，得到 ${formatTime(barEnd)}`;
+
+  const stated = buildDraft("下周三到周五从北京去成都出差，晚上8点返程", { id: "u5-cd", now, random });
+  const toNine = applySpoken(stated, "把返程改到21:00", "p_u5_21", random, now);
+  if (typeof toNine === "string") return `改到 21:00：${toNine}`;
+  const nine = toNine.book.items.find((item) => item.type === "交通" && item.startTime === "21:00" && item.title.includes("北京"));
+  if (!nine || nine.durationMinutes !== 445 || nine.travelEstimateMinutes !== 445) {
+    return `21:00 返程不应缩短，得到 ${nine?.startTime} ${nine?.durationMinutes}/${nine?.travelEstimateMinutes}`;
+  }
+  if (!nine.note?.includes("预计次日 04:25 到") || nine.note.includes("03:25")) {
+    return `21:00 应改成预计次日 04:25 到：${nine.note}`;
+  }
+  const earlier = applySpoken(toNine.book, "把返程改到16:00", "p_u5_16", random, now);
+  if (typeof earlier === "string") return `改回 16:00：${earlier}`;
+  const earlyRide = earlier.book.items.find((item) => item.id === nine.id);
+  if (earlyRide?.startTime !== "16:00" || earlyRide.durationMinutes !== 445) {
+    return `16:00 仍应是整段 445，得到 ${earlyRide?.startTime} ${earlyRide?.durationMinutes}`;
+  }
+  if (earlyRide.note?.includes("预计次日")) return `16:00 当天能到，应去掉次日到达：${earlyRide.note}`;
+
+  const shrink = applySpoken(chengdu, "改成2天", "p_u3_2", random, now);
+  if (typeof shrink === "string") return `成都改成 2 天：${shrink}`;
+  const meeting = shrink.book.items.find((item) => item.title.includes("开会"));
+  const shrunkRide = shrink.book.items.find((item) => item.title === "返回北京");
+  const shrunkStation = shrink.book.items.find((item) => item.title === "去车站");
+  if (!meeting || meeting.dayIndex !== 2 || meeting.startTime !== "14:00" || !meeting.locked) {
+    return `开会应仍锁在第 2 天 14:00，得到第 ${meeting?.dayIndex} 天 ${meeting?.startTime}`;
+  }
+  if (!shrunkRide || shrunkRide.dayIndex !== 2 || shrunkRide.startTime !== "18:00" || shrunkRide.durationMinutes !== 445) {
+    return `改成 2 天应把返程退到第 2 天 18:00 且不缩短，得到第 ${shrunkRide?.dayIndex} 天 ${shrunkRide?.startTime} ${shrunkRide?.durationMinutes}`;
+  }
+  if (shrunkRide.travelEstimateMinutes !== 445 || !shrunkRide.note?.includes("预计次日 01:25 到")) {
+    return `退回的返程应注明次日 01:25：${shrunkRide.travelEstimateMinutes} ${shrunkRide.note}`;
+  }
+  if (shrunkStation?.dayIndex !== 2 || shrunkStation.startTime !== "17:00") {
+    return `去车站应跟着到第 2 天 17:00，得到第 ${shrunkStation?.dayIndex} 天 ${shrunkStation?.startTime}`;
+  }
+
+  const leisure = buildDraft("从北京去成都玩3天", { id: "u3-play", now, random });
+  const leisureSample = leisure.items.find((item) => item.type === "餐") ?? leisure.items[0];
+  if (!leisureSample) return "游玩京蓉缺少可复制的行程项";
+  const withMeeting = applyPatch(leisure, {
+    id: "p_u3_meet",
+    label: "加开会",
+    kind: "user",
+    ops: [
+      {
+        op: "add",
+        item: {
+          ...leisureSample,
+          id: "i_u3_meet",
+          dayIndex: 2,
+          startTime: "14:00",
+          durationMinutes: 120,
+          title: "开会",
+          type: "办事",
+          locked: true,
+          priority: "必去",
+          note: "来自你的原话。",
+        },
+      },
+    ],
+  });
+  if (!withMeeting.ok) return `游玩行程加开会失败：${withMeeting.error}`;
+  const leisureTwo = applySpoken(withMeeting.book, "改成2天", "p_u3_play2", random, now);
+  if (typeof leisureTwo === "string") return `游玩改成 2 天：${leisureTwo}`;
+  const leisureRide = leisureTwo.book.items.find((item) => item.title === "返回北京");
+  const leisureStation = leisureTwo.book.items.find((item) => item.dayIndex === 2 && item.title === "去车站");
+  const leisureMeet = leisureTwo.book.items.find((item) => item.id === "i_u3_meet");
+  if (!leisureMeet || leisureMeet.startTime !== "14:00" || !leisureMeet.locked) return "游玩开会应留在 14:00";
+  if (!leisureRide || leisureRide.dayIndex !== 2 || leisureRide.startTime !== "18:00" || leisureRide.durationMinutes !== 445) {
+    return `游玩改成 2 天返程应为 18:00 / 445，得到第 ${leisureRide?.dayIndex} 天 ${leisureRide?.startTime} ${leisureRide?.durationMinutes}`;
+  }
+  if (leisureStation?.startTime !== "17:00") return `游玩去车站应为 17:00，得到 ${leisureStation?.startTime}`;
+
+  const lengthened = applySpoken(chengdu, "改成4天", "p_u4_4", random, now);
+  if (typeof lengthened === "string") return `成都改成 4 天：${lengthened}`;
+  if (lengthened.book.items.some((item) => item.title.startsWith("返回") || item.title === "去车站")) {
+    return `超过 3 天应去掉推断返程和去车站：${lengthened.book.items
+      .filter((item) => item.title.startsWith("返回") || item.title === "去车站")
+      .map((item) => item.title)
+      .join("、")}`;
+  }
+  const droppedTag = lengthened.book.assumptions.find((item) => item.key === "return");
+  if (!droppedTag?.value.includes("这次不补")) return `推断返程去掉后应写这次不补：${droppedTag?.value}`;
+
+  const su = buildDraft("从上海去苏州玩2天", { id: "u4-su", now, random });
+  const suFour = applySpoken(su, "改成4天", "p_u4_su", random, now);
+  if (typeof suFour === "string") return `苏州改成 4 天：${suFour}`;
+  if (suFour.book.items.some((item) => item.title.startsWith("返回") || item.title === "去车站")) return "苏州超过 3 天不应留下推断返程";
+  if (!suFour.book.assumptions.find((item) => item.key === "return")?.value.includes("这次不补")) return "苏州假设应写这次不补";
+
+  const statedFour = applySpoken(stated, "改成4天", "p_u4_stated", random, now);
+  if (typeof statedFour === "string") return `写明返程改成 4 天：${statedFour}`;
+  const keptRide = statedFour.book.items.find((item) => item.type === "交通" && item.locked && item.title.includes("北京") && item.title.includes("成都"));
+  if (!keptRide || keptRide.dayIndex !== 4 || keptRide.startTime !== "20:00") {
+    return `写明的返程应留在第 4 天 20:00，得到第 ${keptRide?.dayIndex} 天 ${keptRide?.startTime} ${keptRide?.title}`;
+  }
+  if (statedFour.book.assumptions.some((item) => item.value.includes("这次不补"))) return "写明的返程不应说这次不补";
+
+  const fridayBrief = "下周三到周五从北京去成都出差，周五下午5点开会";
+  const missingOut = bookFromExtract(
+    {
+      kind: "办事",
+      origin: "北京",
+      destination: { city: "成都", area: null },
+      startDate: "2026-11-18",
+      endDate: "2026-11-20",
+      party: null,
+      outbound: null,
+      inbound: null,
+      fixed: [{ date: "2026-11-20", time: "17:00", endTime: null, title: "开会", place: "成都", type: "办事" }],
+      lodging: null,
+      interests: [],
+      pace: null,
+      budget: null,
+      missing: [],
+    },
+    fridayBrief,
+    now,
+    "u-out-missing",
+  );
+  if (typeof missingOut === "string") return missingOut;
+  const filledOut = missingOut.items.find((item) => item.dayIndex === 1 && item.type === "交通" && item.title.includes("前往"));
+  if (!filledOut || filledOut.startTime !== "08:00" || filledOut.locked) {
+    return `没写去程时应补第 1 天 08:00 且不锁定，得到 ${filledOut?.title ?? "无"} ${filledOut?.startTime} locked=${filledOut?.locked}`;
+  }
+  const fridayMeet = missingOut.items.find((item) => item.title.includes("开会"));
+  if (!fridayMeet || fridayMeet.dayIndex !== 3 || fridayMeet.startTime !== "17:00") {
+    return `周五开会应留在第 3 天 17:00，得到第 ${fridayMeet?.dayIndex} 天 ${fridayMeet?.startTime}`;
+  }
+  const stolenOut = bookFromExtract(
+    {
+      kind: "办事",
+      origin: "北京",
+      destination: { city: "成都", area: null },
+      startDate: "2026-11-18",
+      endDate: "2026-11-20",
+      party: null,
+      outbound: { date: "2026-11-20", time: "17:00", mode: null, from: "北京", to: "成都" },
+      inbound: null,
+      fixed: [{ date: "2026-11-20", time: "17:00", endTime: null, title: "开会", place: "成都", type: "办事" }],
+      lodging: null,
+      interests: [],
+      pace: null,
+      budget: null,
+      missing: [],
+    },
+    fridayBrief,
+    now,
+    "u-out-stolen",
+  );
+  if (typeof stolenOut === "string") return stolenOut;
+  const repaired = stolenOut.items.find((item) => item.type === "交通" && item.title.includes("前往") && item.title.includes("成都"));
+  if (!repaired || repaired.dayIndex !== 1 || repaired.startTime !== "08:00" || repaired.locked) {
+    return `开会钟点写进去程时应改回第 1 天 08:00，得到第 ${repaired?.dayIndex} 天 ${repaired?.startTime} locked=${repaired?.locked}`;
+  }
+  const keptOutBook = bookFromExtract(
+    {
+      kind: "办事",
+      origin: "北京",
+      destination: { city: "成都", area: null },
+      startDate: "2026-11-18",
+      endDate: "2026-11-20",
+      party: null,
+      outbound: { date: "2026-11-18", time: "07:30", mode: "高铁", from: "北京", to: "成都" },
+      inbound: null,
+      fixed: [{ date: "2026-11-20", time: "17:00", endTime: null, title: "开会", place: "成都", type: "办事" }],
+      lodging: null,
+      interests: [],
+      pace: null,
+      budget: null,
+      missing: [],
+    },
+    fridayBrief,
+    now,
+    "u-out-kept",
+  );
+  if (typeof keptOutBook === "string") return keptOutBook;
+  const keptOut = keptOutBook.items.find((item) => item.type === "交通" && item.title.includes("前往") && item.title.includes("成都"));
+  if (!keptOut || keptOut.dayIndex !== 1 || keptOut.startTime !== "07:30") {
+    return `已经正确的去程应留在第 1 天 07:30，得到第 ${keptOut?.dayIndex} 天 ${keptOut?.startTime}`;
+  }
+
+  const dawn = buildDraft("周六早上6点从济南出发去泰山", { id: "u6-tai", now, random });
+  const dawnRide = dawn.items.find((item) => item.type === "交通" && item.title.includes("前往"));
+  const dawnClimb = dawn.items.find((item) => item.type === "景点" && item.title.includes("泰山"));
+  if (!dawnRide || dawnRide.startTime !== "06:00" || !dawnClimb) return "泰山早出发用例缺少去程或爬山";
+  const arrived = (parseTime(dawnRide.startTime) ?? 0) + dawnRide.durationMinutes;
+  if (arrived < 6 * 60 + 20 || arrived > 6 * 60 + 50) return `到达应约 06:35，得到 ${formatTime(arrived)}`;
+  const climbAt = parseTime(dawnClimb.startTime) ?? 0;
+  if (climbAt < 9 * 60 + 30 || climbAt > 10 * 60 + 30) return `开爬应约 10:00，得到 ${dawnClimb.startTime}`;
+  const breakfast = dawn.items.find((item) => item.dayIndex === 1 && (item.title.includes("早餐") || item.title.includes("早饭")));
+  if (!breakfast) return "06:35 到达、10:00 开爬之间应有早餐";
+  const breakfastAt = parseTime(breakfast.startTime) ?? 0;
+  if (breakfastAt < arrived || breakfastAt + breakfast.durationMinutes > climbAt) {
+    return `早餐应在到达之后、开爬之前，得到 ${breakfast.place} ${breakfast.startTime}（${breakfast.durationMinutes}）爬 ${dawnClimb.startTime}`;
+  }
+  const climbEnd = climbAt + dawnClimb.durationMinutes;
+  if (dawn.items.some((item) => item.dayIndex === 1 && item.type === "餐" && (parseTime(item.startTime) ?? 0) >= climbEnd && /早餐|早饭|当地早餐/.test(item.title))) {
+    return "爬完不应再叫当地早餐";
+  }
+  return null;
+}
+
 async function main(): Promise<void> {
   const parserError = assertParser();
   if (parserError) {
@@ -2643,6 +2967,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log("  ok shared rides, first-day arrival, filler titles");
+  const userFixError = assertUserFixes();
+  if (userFixError) {
+    console.error(`user-fixes  ${userFixError}`);
+    process.exit(1);
+  }
+  console.log("  ok return clock, day count, outbound, taishan breakfast");
   const extractError = await assertExtract();
   if (extractError) {
     console.error(`extract  ${extractError}`);
