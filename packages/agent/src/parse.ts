@@ -102,7 +102,8 @@ function extractDays(brief: string): { days: number; assumed: boolean } {
       return { days: clampDays(diff + 1), assumed: false };
     }
   }
-  if (/当天往返|当日往返/.test(brief)) return { days: 1, assumed: false };
+  // 「当天」 alone is not a 1-day trip. 回 / 往返, or 一日游, is.
+  if (/当天回|当日回|当天往返|当日往返|一日游/.test(brief)) return { days: 1, assumed: false };
   if (/周末/.test(brief)) return { days: 2, assumed: false };
   if (/一周/.test(brief)) return { days: 7, assumed: false };
   return { days: 3, assumed: true };

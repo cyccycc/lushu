@@ -12,7 +12,7 @@ export type PlaceHit = {
 
 /** Landmark phrases that must not be geocoded as a raw sentence. */
 const LANDMARKS: { re: RegExp; city: string; english: string; landmark: string }[] = [
-  { re: /西湖|灵隐|雷峰塔|断桥|河坊街|白堤|苏堤|龙井|湖边/, city: "杭州", english: "Hangzhou", landmark: "西湖" },
+  { re: /西湖|灵隐|雷峰塔|断桥|河坊街|白堤|苏堤|龙井/, city: "杭州", english: "Hangzhou", landmark: "西湖" },
   { re: /外滩|豫园|武康路|陆家嘴/, city: "上海", english: "Shanghai", landmark: "外滩" },
   { re: /故宫|颐和园|天坛|什刹海/, city: "北京", english: "Beijing", landmark: "故宫" },
   { re: /兵马俑|大雁塔/, city: "西安", english: "Xi'an", landmark: "兵马俑" },
@@ -119,6 +119,7 @@ export function isVaguePlaceName(raw: string): boolean {
   const token = raw.trim();
   if (!token) return true;
   if (KNOWN_CITIES.some((city) => city.name === token)) return false;
+  if (token === "湖边") return true;
   return /个|的地方|哪里|哪儿|哪座|什么地方/.test(token);
 }
 
@@ -193,6 +194,13 @@ export function mentionedCities(text: string): { name: string; english: string; 
   return hits.map(({ name, english, index }) => ({ name, english, index }));
 }
 
+/** 「湖边」 is not a city and is not 西湖. A sentence with no city should ask where. */
+export function briefIsUnplacedShore(text: string): boolean {
+  if (!text.includes("湖边")) return false;
+  if (/西湖|灵隐|雷峰塔|断桥|河坊街|白堤|苏堤|龙井/.test(text)) return false;
+  return mentionedCities(text).length === 0;
+}
+
 export function citiesInText(text: string): PlaceHit[] {
   const hits: PlaceHit[] = [];
   for (const alias of LANDMARKS) {
@@ -204,15 +212,12 @@ export function citiesInText(text: string): PlaceHit[] {
       city: alias.city,
       english: alias.english,
       index,
-      landmark: matchedText === "湖边" ? alias.landmark : matchedText,
+      landmark: matchedText,
     });
   }
   hits.sort((a, b) => a.index - b.index);
   const seen = new Set<string>();
-  const shoreOnly = text.includes("湖边") && !/西湖|灵隐|雷峰塔|断桥|河坊街|白堤|苏堤|龙井/.test(text);
-  const otherCity = shoreOnly && mentionedCities(text).some((city) => city.name !== "杭州");
   return hits.filter((hit) => {
-    if (otherCity && hit.city === "杭州" && hit.landmark === "西湖") return false;
     if (seen.has(hit.city)) return false;
     seen.add(hit.city);
     return true;

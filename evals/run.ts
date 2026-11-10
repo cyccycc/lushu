@@ -1594,6 +1594,10 @@ function assertRound3(): string | null {
   if (lockedReturn) return `不应锁定返程：${lockedReturn.title} ${lockedReturn.startTime}`;
   const arrivedReturn = assertInferredReturn(arrived, "上海", 3);
   if (arrivedReturn) return `苏州 5 点到：${arrivedReturn}`;
+  const arrivedBack = arrived.items.find((item) => item.title === "返回上海");
+  if (!arrivedBack || arrivedBack.durationMinutes >= 90 || arrivedBack.durationMinutes === outbound.durationMinutes) {
+    return `写了 5 点到时，返程应沿用沪苏估计而不是 ${outbound.durationMinutes} 分钟的到达跨度，得到 ${arrivedBack?.durationMinutes}`;
+  }
 
   const echoed = bookFromExtract(
     {
@@ -1658,6 +1662,14 @@ function assertRound3(): string | null {
   if (rulesBack.startTime !== modelBack.startTime || rulesBack.source.note !== modelBack.source.note) {
     return `乌镇返程没有对齐：规则 ${rulesBack.startTime}/${rulesBack.source.note}，抽取 ${modelBack.startTime}/${modelBack.source.note}`;
   }
+  const rulesOut = wuzhenRules.items.find((item) => item.type === "交通" && item.title.includes("前往嘉兴"));
+  const modelOut = wuzhenModel.items.find((item) => item.type === "交通" && item.title.includes("前往嘉兴"));
+  if (!rulesOut || rulesOut.durationMinutes !== rulesBack.durationMinutes || rulesOut.durationMinutes >= 90) {
+    return `乌镇去程和返程应共用杭州到嘉兴的估计，而不是 90 对 120，得到 ${rulesOut?.durationMinutes} / ${rulesBack.durationMinutes}`;
+  }
+  if (!modelOut || modelOut.durationMinutes !== modelBack.durationMinutes || modelOut.durationMinutes !== rulesOut.durationMinutes) {
+    return `乌镇抽取应与规则共用同一时长，得到规则 ${rulesOut.durationMinutes} 抽取 ${modelOut?.durationMinutes}/${modelBack.durationMinutes}`;
+  }
 
   for (const brief of ["周六从杭州去乌镇，单程", "周六从杭州去乌镇，然后去上海"]) {
     const book = buildDraft(brief, { id: "wz-oneway", now, random });
@@ -1669,12 +1681,25 @@ function assertRound3(): string | null {
 
   const hop = buildDraft("明天下午2点从上海坐高铁去苏州", { id: "sz-hop", now, random });
   const hopRide = hop.items.find((item) => item.type === "交通" && item.title.includes("前往苏州"));
+  const hopBack = hop.items.find((item) => item.title === "返回上海");
   if (!hopRide || hopRide.durationMinutes >= 90) return `沪苏高铁应远小于 180 分钟，得到 ${hopRide?.durationMinutes}`;
+  if (!hopBack || hopBack.durationMinutes !== hopRide.durationMinutes) {
+    return `沪苏去程和返程应一样短，得到 ${hopRide.durationMinutes} / ${hopBack?.durationMinutes}`;
+  }
+  if (arrivedBack.durationMinutes !== hopRide.durationMinutes) {
+    return `5点到的返程应等于没写到达时的沪苏估计 ${hopRide.durationMinutes}，得到 ${arrivedBack.durationMinutes}`;
+  }
 
-  const lake = buildDraft("周六下午3点到8点在湖边走走", { id: "lake-range", now, random });
-  const shore = lake.items.find((item) => item.type === "景点" && (item.title.includes("西湖") || item.title.includes("湖边")));
+  const lake = buildDraft("这周末去西湖，周六下午3点到8点在湖边走走", { id: "lake-range", now, random });
+  if (lake.city !== "杭州") return `西湖应是杭州，得到 ${lake.city}`;
+  const shore = lake.items.find((item) => item.type === "景点" && item.title.includes("西湖"));
   if (!shore || shore.startTime !== "15:00" || shore.durationMinutes !== 300) {
-    return `湖边应 15:00 起到 20:00，得到 ${shore?.title} ${shore?.startTime} ${shore?.durationMinutes} 分钟`;
+    return `西湖应 15:00 起到 20:00，得到 ${shore?.title} ${shore?.startTime} ${shore?.durationMinutes} 分钟`;
+  }
+  if (lake.items.some((item) => item.title.includes("湖边"))) return "湖边不应单独排成景点";
+  const shoreAsk = buildDraft("想去湖边走走", { id: "shore-ask", now, random });
+  if (shoreAsk.question?.prompt !== "去哪座城市？" || shoreAsk.items.length > 0 || shoreAsk.city === "杭州") {
+    return `想去湖边走走应只追问去哪座城市，得到 ${shoreAsk.city} ${shoreAsk.question?.prompt ?? "无"} 项${shoreAsk.items.length}`;
   }
 
   const dawnBrief = "周六早上6点从济南出发去泰山";
@@ -1854,7 +1879,9 @@ async function assertLiveExtract(): Promise<string | null> {
       brief: "明天早上 8 点从上海出发去苏州，当天回",
       check: (book) => {
         const span = book.items.reduce((max, item) => Math.max(max, item.dayIndex), 1);
-        const legs = book.items.filter((item) => item.type === "交通" && item.title.startsWith("从"));
+        const legs = book.items.filter(
+          (item) => item.type === "交通" && (item.title.startsWith("从") || item.title.startsWith("返回")),
+        );
         const outbound = legs.find((item) => item.title.includes("前往苏州"));
         if (book.city !== "苏州" || span !== 1 || !outbound?.locked || legs.length < 2) {
           return `苏州当天回应有锁定去程和返程，得到 ${book.city} ${span} 交通${legs.length}`;
@@ -1877,8 +1904,9 @@ async function assertLiveExtract(): Promise<string | null> {
         if (!ride || ride.startTime !== "14:00") return `去程应 14:00 出发，得到 ${ride?.startTime}`;
         const end = (parseTime(ride.startTime) ?? 0) + ride.durationMinutes;
         if (end !== 17 * 60) return "5点到应落在去程上";
-        const last = book.items.reduce((max, item) => Math.max(max, item.dayIndex), 1);
-        return assertInferredReturn(book, "上海", last);
+        const span = book.items.reduce((max, item) => Math.max(max, item.dayIndex), 1);
+        if (span !== 3) return `没写天数应是 3 天，得到 ${span}`;
+        return assertInferredReturn(book, "上海", 3);
       },
     },
     {
@@ -1886,11 +1914,12 @@ async function assertLiveExtract(): Promise<string | null> {
       check: (book) => (book.items.some((item) => item.title.startsWith("返回")) ? "单程不应推断返程" : null),
     },
     {
-      brief: "周六下午3点到8点在湖边走走",
+      brief: "这周末去西湖，周六下午3点到8点在湖边走走",
       check: (book) => {
-        const shore = book.items.find((item) => item.type === "景点" && (item.title.includes("西湖") || item.title.includes("湖边")));
+        if (book.city !== "杭州") return `西湖应是杭州，得到 ${book.city}`;
+        const shore = book.items.find((item) => item.type === "景点" && item.title.includes("西湖"));
         if (!shore || shore.startTime !== "15:00" || shore.durationMinutes !== 300) {
-          return `湖边应 15:00 起到 20:00，得到 ${shore?.title} ${shore?.startTime} ${shore?.durationMinutes}`;
+          return `西湖应 15:00 起到 20:00，得到 ${shore?.title} ${shore?.startTime} ${shore?.durationMinutes}`;
         }
         return null;
       },
@@ -1925,6 +1954,171 @@ async function assertLiveExtract(): Promise<string | null> {
     if (problem) problems.push(`${item.brief.slice(0, 24)}：${problem}`);
   }
   return problems.length > 0 ? problems.join("\n") : null;
+}
+
+function daySpan(book: Roadbook): number {
+  return book.items.reduce((max, item) => Math.max(max, item.dayIndex), 1);
+}
+
+function looseExtract(
+  city: string,
+  origin: string | null,
+  start: string | null,
+  end: string | null,
+  extra: Partial<TripExtract> = {},
+): TripExtract {
+  const { destination, ...rest } = extra;
+  return {
+    kind: "旅游",
+    origin,
+    startDate: start,
+    endDate: end,
+    party: null,
+    outbound: null,
+    inbound: null,
+    fixed: [],
+    lodging: null,
+    interests: [],
+    pace: null,
+    budget: null,
+    missing: [],
+    ...rest,
+    destination: destination ?? { city, area: null },
+  };
+}
+
+function assertNoReturn(book: Roadbook): string | null {
+  if (book.items.some((item) => item.type === "交通" && item.title.startsWith("返回"))) return `不应推断返程：${book.title}`;
+  if (book.assumptions.some((item) => item.key === "return")) return "不应有返程假设";
+  return null;
+}
+
+function assertSpanBriefs(): string | null {
+  const now = new Date("2026-11-09T02:00:00.000Z");
+  let n = 0;
+  const random = () => `s${(n += 1)}`;
+  const arrivalBrief = "明天下午2点从上海坐高铁去苏州，5点到";
+  const guessed = bookFromExtract(
+    looseExtract("苏州", "上海", "2026-11-10", "2026-11-10", {
+      outbound: { date: "2026-11-10", time: "14:00", mode: "高铁", from: "上海", to: "苏州" },
+      inbound: { date: "2026-11-10", time: "17:00", mode: "高铁", from: "苏州", to: "上海" },
+    }),
+    arrivalBrief,
+    now,
+    "sz-guessed-same-day",
+  );
+  if (typeof guessed === "string") return guessed;
+  if (daySpan(guessed) !== 3) return `没写天数的同一天 endDate 应回落到 3 天，得到 ${daySpan(guessed)}`;
+  const guessedOut = guessed.items.find((item) => item.type === "交通" && item.title.includes("前往苏州"));
+  const guessedEnd = guessedOut ? (parseTime(guessedOut.startTime) ?? 0) + guessedOut.durationMinutes : -1;
+  if (!guessedOut?.locked || guessedOut.startTime !== "14:00" || guessedEnd !== 17 * 60) {
+    return `去程应锁定 14:00 并在 17:00 到，得到 ${guessedOut?.startTime} locked=${guessedOut?.locked} 结束 ${guessedEnd}`;
+  }
+  const guessedReturn = assertInferredReturn(guessed, "上海", 3);
+  if (guessedReturn) return `猜的同一天结束：${guessedReturn}`;
+
+  const bareDay = bookFromExtract(
+    looseExtract("苏州", "上海", "2026-11-10", "2026-11-10", {
+      outbound: { date: "2026-11-10", time: "14:00", mode: "高铁", from: "上海", to: "苏州" },
+    }),
+    "明天从上海坐高铁去苏州，当天",
+    now,
+    "sz-bare-today",
+  );
+  if (typeof bareDay === "string") return bareDay;
+  if (daySpan(bareDay) !== 3) return `单独的「当天」不应留成 1 天，得到 ${daySpan(bareDay)}`;
+
+  const oneDayBriefs = [
+    "明天从上海坐高铁去苏州，当天回",
+    "明天从上海坐高铁去苏州，当日往返",
+    "明天从上海坐高铁去苏州，当日回",
+    "明天从上海去苏州，只玩一天",
+    "明天从上海去苏州一日游",
+  ];
+  for (const brief of oneDayBriefs) {
+    const rules = buildDraft(brief, { id: "one-day-rules", now, random });
+    if (daySpan(rules) !== 1) return `规则 ${brief} 应是 1 天，得到 ${daySpan(rules)}`;
+    const model = bookFromExtract(
+      looseExtract("苏州", "上海", "2026-11-10", "2026-11-10", {
+        outbound: { date: "2026-11-10", time: "09:00", mode: "高铁", from: "上海", to: "苏州" },
+        inbound: { date: "2026-11-10", time: null, mode: "高铁", from: "苏州", to: "上海" },
+      }),
+      brief,
+      now,
+      "one-day-model",
+    );
+    if (typeof model === "string") return `${brief} ${model}`;
+    if (daySpan(model) !== 1) return `抽取 ${brief} 应是 1 天，得到 ${daySpan(model)}`;
+    const phrase = brief.match(/当天回|当日往返|当日回/)?.[0];
+    for (const book of [rules, model]) {
+      const back = book.items.find((item) => item.title === "返回上海" || item.title.startsWith("返回"));
+      const tag = book.assumptions.find((item) => item.key === "return");
+      if (!back) return `${brief} 应有返回上海，得到 ${book.items.filter((item) => item.type === "交通").map((item) => item.title).join("、")}`;
+      if (phrase) {
+        if (back.locked || back.startTime !== "18:00") {
+          return `${brief} 没写钟点的返程应是未锁定的 18:00，得到 ${back.startTime} locked=${back.locked}`;
+        }
+        const blob = `${back.note ?? ""}${back.source.note ?? ""}`;
+        if (!blob.includes("时间推断") || blob.includes("来自你的原话")) return `${brief} 返程应标时间推断：${blob}`;
+        if (back.note?.includes("原话没提返程") || (!back.note?.includes(phrase) && !back.note?.includes("钟点没写"))) {
+          return `${brief} 返程备注应沿用原话：${back.note}`;
+        }
+        if (tag?.value !== "钟点没写，按当天傍晚估" || tag.value.includes("没写，按第")) {
+          return `${brief} 返程标签应为钟点没写，得到 ${tag?.value}`;
+        }
+      } else if (!back.note?.includes("原话没提返程") || tag?.value !== "没写，按第 1 天傍晚估") {
+        return `${brief} 没提返程应保留原备注和标签：${back.note} / ${tag?.value}`;
+      }
+    }
+  }
+
+  const voicedClock = buildDraft("明天早上8点从上海坐高铁去苏州，下午6点当天回", { id: "voiced-clock", now, random });
+  const voicedBack = voicedClock.items.find((item) => item.title.includes("上海") && item.title !== "从上海前往苏州" && item.type === "交通");
+  const voicedBlob = `${voicedBack?.note ?? ""}${voicedBack?.source.note ?? ""}`;
+  if (!voicedBack?.locked || voicedBack.startTime !== "18:00" || !voicedBlob.includes("来自你的原话")) {
+    return `写了返程钟点应锁定并标来自你的原话，得到 ${voicedBack?.title} ${voicedBack?.startTime} locked=${voicedBack?.locked} ${voicedBlob}`;
+  }
+  if (voicedClock.assumptions.some((item) => item.key === "return" && item.value.includes("钟点没写"))) {
+    return "写了返程钟点不应再标钟点没写";
+  }
+
+  const fiveDayBriefs = ["从上海去北京玩5天", "从上海去北京五天", "从上海去北京五天四晚"];
+  for (const brief of fiveDayBriefs) {
+    const rules = buildDraft(brief, { id: "five-rules", now, random });
+    if (daySpan(rules) !== 5) return `规则 ${brief} 应是 5 天，得到 ${daySpan(rules)}`;
+    const rulesReturn = assertNoReturn(rules);
+    if (rulesReturn) return `规则 ${brief}：${rulesReturn}`;
+    const model = bookFromExtract(looseExtract("北京", "上海", "2026-11-10", null), brief, now, "five-model");
+    if (typeof model === "string") return `${brief} ${model}`;
+    if (daySpan(model) !== 5) return `抽取没写 endDate 的 ${brief} 应是 5 天，得到 ${daySpan(model)}`;
+    const modelReturn = assertNoReturn(model);
+    if (modelReturn) return `抽取 ${brief}：${modelReturn}`;
+    const guessedFive = bookFromExtract(
+      looseExtract("北京", "上海", "2026-11-10", "2026-11-10"),
+      brief,
+      now,
+      "five-guessed",
+    );
+    if (typeof guessedFive === "string") return `${brief} ${guessedFive}`;
+    if (daySpan(guessedFive) !== 5) return `抽取把 ${brief} 猜成当天时应仍是 5 天，得到 ${daySpan(guessedFive)}`;
+  }
+
+  const openBrief = "从上海去北京";
+  const openRules = buildDraft(openBrief, { id: "open-rules", now, random });
+  if (daySpan(openRules) !== 3) return `没写天数应默认 3 天，得到 ${daySpan(openRules)}`;
+  const openReturn = assertInferredReturn(openRules, "上海", 3);
+  if (openReturn) return `短途默认：${openReturn}`;
+  const openModel = bookFromExtract(looseExtract("北京", "上海", null, null), openBrief, now, "open-model");
+  if (typeof openModel === "string") return openModel;
+  if (daySpan(openModel) !== 3) return `抽取没写日期和天数应默认 3 天，得到 ${daySpan(openModel)}`;
+  const openModelReturn = assertInferredReturn(openModel, "上海", 3);
+  if (openModelReturn) return `抽取短途默认：${openModelReturn}`;
+
+  const shoreModel = validateExtract(looseExtract("杭州", null, null, null, { interests: ["西湖"] }), now, "想去湖边走走");
+  if (shoreModel.ok || shoreModel.ask !== "去哪座城市？") return "抽取把湖边当成杭州时应追问去哪座城市";
+  const shoreVague = validateExtract(looseExtract("湖边", null, null, null), now, "想去湖边走走");
+  if (shoreVague.ok || shoreVague.ask !== "去哪座城市？") return "抽取目的地写成湖边时应追问去哪座城市";
+  return null;
 }
 
 function assertLlmBase(): string | null {
@@ -2017,6 +2211,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log("  ok return honesty, retime, range, departure clock");
+  const spanError = assertSpanBriefs();
+  if (spanError) {
+    console.error(`span  ${spanError}`);
+    process.exit(1);
+  }
+  console.log("  ok day span, same-day guess, five-day extract");
   const extractError = await assertExtract();
   if (extractError) {
     console.error(`extract  ${extractError}`);

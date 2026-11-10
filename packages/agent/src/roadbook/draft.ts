@@ -172,6 +172,25 @@ export type DayBuildOptions = {
 };
 
 const INFERRED_RETURN_NOTE = "原话没提返程，按短途补的。不回去就删掉";
+const VOICED_RETURN_CHIP = "钟点没写，按当天傍晚估";
+
+/** Same-day return words with no clock of their own. A bare 「当天」 does not count. */
+function voicedReturnPhrase(brief: string): string | null {
+  if (statedReturnClock(brief)) return null;
+  const match = brief.match(/当天回|当天往返|当日往返|当日回/);
+  return match?.[0] ?? null;
+}
+
+function returnEstimateNote(brief: string): string {
+  const phrase = voicedReturnPhrase(brief);
+  if (!phrase) return INFERRED_RETURN_NOTE;
+  return `原话说${phrase}，钟点没写。不回去就删掉`;
+}
+
+function returnEstimateChip(brief: string, days: number): string {
+  if (voicedReturnPhrase(brief)) return VOICED_RETURN_CHIP;
+  return `没写，按第 ${days} 天傍晚估`;
+}
 
 function inferredReturnItem(
   random: () => string,
@@ -179,6 +198,7 @@ function inferredReturnItem(
   origin: string,
   placeName: string,
   mode: "高铁" | "飞机" | "自驾" | "其他" | null,
+  note = INFERRED_RETURN_NOTE,
 ): RoadbookItem {
   const ride = modeMinutes(mode, placeName, origin);
   return item(random, {
@@ -194,7 +214,7 @@ function inferredReturnItem(
     locked: false,
     priority: "必去",
     indoor: true,
-    note: INFERRED_RETURN_NOTE,
+    note,
     source: inferredSource("时间推断"),
   });
 }
@@ -230,16 +250,17 @@ export function itemsForDay(
   const second = claimSight(pool, used, mustVisit, allowRepeat) ?? fillerSight(used);
   const items: RoadbookItem[] = [];
   if (options.origin && dayIndex === 1 && options.origin !== placeName) {
+    const ride = modeMinutes(null, options.origin, placeName);
     items.push(
       item(random, {
         dayIndex,
         startTime: "08:00",
-        durationMinutes: 90,
+        durationMinutes: ride,
         title: `从${options.origin}前往${placeName}`,
         place: options.origin,
         type: "交通",
         status: "待做",
-        travelEstimateMinutes: 0,
+        travelEstimateMinutes: ride,
         locked: false,
         priority: "必去",
         indoor: true,
@@ -405,16 +426,17 @@ function fullDayItems(
   const mountain = place.name.endsWith("山");
   const items: RoadbookItem[] = [];
   if (arriving && origin && origin !== placeName) {
+    const ride = modeMinutes(null, origin, placeName);
     items.push(
       item(random, {
         dayIndex,
         startTime: "06:30",
-        durationMinutes: 90,
+        durationMinutes: ride,
         title: `从${origin}前往${placeName}`,
         place: origin,
         type: "交通",
         status: "待做",
-        travelEstimateMinutes: 0,
+        travelEstimateMinutes: ride,
         locked: false,
         priority: "必去",
         indoor: true,
@@ -875,6 +897,38 @@ function applySpokenDates(spec: DraftSpec, text: string, now: Date): void {
   }
 }
 
+const SAME_DAY_TRIP = /当天回|当日往返|当日回|只玩一天|一日游/;
+
+/** A date range or a named return day. A clock like 「5点到」 is not an end date. */
+function briefStatesEndDate(brief: string): boolean {
+  if (/(?:周|星期|礼拜)[一二三四五六日天]\s*(?:到|至)\s*(?:周|星期|礼拜)?[一二三四五六日天]/.test(brief)) return true;
+  if (/\d{1,2}\s*月\s*\d{1,2}\s*[日号][\s\S]{0,16}(?:到|至|—|-|~|～)[\s\S]{0,12}\d{1,2}\s*[日号]/.test(brief)) return true;
+  if (/(?:今天|明天|后天|今晚|明日|后日)\s*(?:早上|上午|下午|晚上|中午|傍晚)?\s*(?:回|返回|返程)/.test(brief)) return true;
+  if (/(?:回|返回|返程)\s*(?:在)?\s*(?:今天|明天|后天|今晚|明日)/.test(brief)) return true;
+  return false;
+}
+
+function keepsSameDaySpan(brief: string, parsed: { days: number; daysAssumed: boolean }): boolean {
+  if (SAME_DAY_TRIP.test(brief)) return true;
+  return !parsed.daysAssumed && parsed.days === 1;
+}
+
+/**
+ * Models often set endDate = startDate when the brief never named a length.
+ * That guess must not become a 1-day trip. A real 1-day brief, or an explicit end date, stays.
+ */
+function guessedSameDayEnd(
+  brief: string,
+  start: string | null,
+  end: string | null,
+  parsed: { days: number; daysAssumed: boolean },
+): boolean {
+  if (!start || !end || end !== start) return false;
+  if (keepsSameDaySpan(brief, parsed)) return false;
+  if (briefStatesEndDate(brief)) return false;
+  return true;
+}
+
 function alignInboundMode(spec: DraftSpec): void {
   if (spec.inbound && !spec.inbound.mode && spec.outbound?.mode) {
     spec.inbound = { ...spec.inbound, mode: spec.outbound.mode };
@@ -1273,15 +1327,27 @@ export function specFromExtract(extract: ExtractInput, _now = new Date(), ask: s
     spec.origin = null;
     spec.cityInferred = true;
   }
+  const parsed = parseBrief(brief);
   const start = extract.startDate;
-  const end = extract.endDate;
-  if (start && end && end >= start) {
-    const span = daysBetween(start, end) + 1;
-    if (span >= 1 && span <= 7) {
-      spec.days = span;
-      spec.daysAssumed = false;
+  let end = extract.endDate;
+  let inbound = extract.inbound ? { ...extract.inbound } : null;
+  if (guessedSameDayEnd(brief, start, end, parsed)) {
+    end = null;
+    // A copied same-day return date would still pin the leg to day 1 after the span falls back to 3.
+    if (inbound?.date && start && inbound.date === start) inbound = { ...inbound, date: null };
+  }
+  const modelSpan = start && end && end >= start ? daysBetween(start, end) + 1 : null;
+  if (modelSpan != null && modelSpan >= 1 && modelSpan <= 7) {
+    spec.days = modelSpan;
+    spec.daysAssumed = false;
+    spec.startDate = start;
+    spec.whenLabel = end === start ? start : `${start} 至 ${end}`;
+  } else if (!parsed.daysAssumed) {
+    spec.days = parsed.days;
+    spec.daysAssumed = false;
+    if (start) {
       spec.startDate = start;
-      spec.whenLabel = end === start ? start : `${start} 至 ${end}`;
+      spec.whenLabel = start;
     }
   } else if (start) {
     spec.startDate = start;
@@ -1298,7 +1364,7 @@ export function specFromExtract(extract: ExtractInput, _now = new Date(), ask: s
   spec.paceInferred = !extract.pace;
   spec.slow = Boolean(extract.pace && /松|慢/.test(extract.pace));
   spec.outbound = extract.outbound ? { ...extract.outbound } : null;
-  spec.inbound = extract.inbound ? { ...extract.inbound } : null;
+  spec.inbound = inbound;
   spec.fixed = extract.fixed.map((item) => ({ ...item }));
   spec.lodging = extract.lodging ? { ...extract.lodging } : null;
   spec.cityInferred = false;
@@ -1400,9 +1466,12 @@ function hsrMinutes(from: string | null, to: string | null): number | null {
 }
 
 function modeMinutes(mode: DraftLeg["mode"], from?: string | null, to?: string | null): number {
-  if (mode === "高铁") return hsrMinutes(from ?? null, to ?? null) ?? 240;
   if (mode === "飞机") return 150;
   if (mode === "自驾") return 240;
+  const ride = hsrMinutes(from ?? null, to ?? null);
+  if (mode === "高铁") return ride ?? 240;
+  // An empty mode still shares the city-pair estimate. Do not flatten to 120 when the coordinates are known.
+  if (mode == null && ride != null) return ride;
   return 120;
 }
 
@@ -1635,7 +1704,14 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
       if (stated) {
         pushLeg({ ...spec.inbound, time }, day, `从${from}前往${to}`, from, true);
       } else {
-        const ride = inferredReturnItem(random, day, to, from, spec.inbound.mode ?? spec.outbound?.mode ?? null);
+        const ride = inferredReturnItem(
+          random,
+          day,
+          to,
+          from,
+          spec.inbound.mode ?? spec.outbound?.mode ?? null,
+          returnEstimateNote(spec.brief),
+        );
         items.push(ride);
         const startMin = parseTime(ride.startTime) ?? 18 * 60;
         inboundMark.push({ day, start: startMin });
@@ -2059,9 +2135,9 @@ export function buildDraftFromSpec(spec: DraftSpec, options: DraftOptions): Road
       assumption(random, {
         key: "return",
         label: "返程",
-        value: `没写，按第 ${ready.days} 天傍晚估`,
+        value: returnEstimateChip(ready.brief, ready.days),
         inferred: true,
-        detail: INFERRED_RETURN_NOTE,
+        detail: returnEstimateNote(ready.brief),
       }),
     );
   }

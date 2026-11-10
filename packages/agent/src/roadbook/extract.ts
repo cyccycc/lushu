@@ -1,5 +1,5 @@
 import { chatComplete, type LlmEnv } from "@lushu/llm";
-import { isVaguePlaceName, matchTravelRoute, resolvePlaceToken } from "@lushu/tools/place";
+import { briefIsUnplacedShore, isVaguePlaceName, matchTravelRoute, resolvePlaceToken } from "@lushu/tools/place";
 import { extractJson } from "../json";
 import { statedPartyCount } from "../parse";
 import { foldUnclockedVisits } from "./draft";
@@ -321,6 +321,7 @@ export function validateExtract(extract: TripExtract, now: Date, brief = ""): Va
     }
   }
 
+  if (briefIsUnplacedShore(brief)) return { ok: false, ask: ASK_CITY };
   if (!value.destination.city || isVaguePlaceName(value.destination.city)) return { ok: false, ask: ASK_CITY };
 
   let ask: string | null = null;
