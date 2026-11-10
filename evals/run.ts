@@ -2162,6 +2162,231 @@ function assertLlmBase(): string | null {
   return null;
 }
 
+const BEIJING_SIGHTS = ["故宫", "中国国家博物馆", "景山", "颐和园", "天坛"];
+const SIGHT_FILLERS = ["城区再走一段", "公园里坐一会儿", "附近随便走走", "再走走"];
+
+function firstOutbound(book: Roadbook): RoadbookItem | undefined {
+  return book.items.find((item) => item.dayIndex === 1 && item.type === "交通" && item.title.includes("前往"));
+}
+
+function returnRide(book: Roadbook, origin: string): RoadbookItem | undefined {
+  return book.items.find((item) => item.type === "交通" && item.title === `返回${origin}`);
+}
+
+function assertSharedRide(rules: Roadbook, other: Roadbook, origin: string, label: string): string | null {
+  const rulesOut = firstOutbound(rules);
+  const rulesBack = returnRide(rules, origin);
+  const otherOut = firstOutbound(other);
+  const otherBack = returnRide(other, origin);
+  if (!rulesOut || !rulesBack || !otherOut || !otherBack) {
+    return `${label} 应有去程和返回${origin}，规则 ${rulesOut?.title ?? "无"}/${rulesBack?.title ?? "无"}，另一条 ${otherOut?.title ?? "无"}/${otherBack?.title ?? "无"}`;
+  }
+  const durations = [rulesOut.durationMinutes, rulesBack.durationMinutes, otherOut.durationMinutes, otherBack.durationMinutes];
+  if (new Set(durations).size !== 1) {
+    return `${label} 去程和返程应共用同一估计，得到规则 ${rulesOut.durationMinutes}/${rulesBack.durationMinutes}，另一条 ${otherOut.durationMinutes}/${otherBack.durationMinutes}`;
+  }
+  return null;
+}
+
+function assertAfterArrival(book: Roadbook, label: string): string | null {
+  const ride = firstOutbound(book);
+  if (!ride || ride.durationMinutes < 300 || ride.durationMinutes > 360) {
+    return `${label} 去程应约 320 分钟，得到 ${ride?.title ?? "无"} ${ride?.durationMinutes ?? "无"}`;
+  }
+  const end = (parseTime(ride.startTime) ?? 0) + ride.durationMinutes;
+  const floor = Math.ceil(end / 10) * 10;
+  for (const item of book.items) {
+    if (item.dayIndex !== 1 || item.type === "交通") continue;
+    const start = parseTime(item.startTime);
+    if (start == null || start < floor) {
+      return `${label} ${item.title} ${item.startTime} 早于到达后的 ${floor} 分钟`;
+    }
+  }
+  if (book.items.some((item) => item.dayIndex === 1 && item.type === "餐" && item.startTime === "10:00")) {
+    return `${label} 不应把早餐放在 10:00`;
+  }
+  if (book.items.some((item) => item.dayIndex === 1 && item.title.includes("故宫") && item.startTime === "11:00")) {
+    return `${label} 不应把故宫放在 11:00`;
+  }
+  return null;
+}
+
+function assertNoNumberedFiller(book: Roadbook, label: string): string | null {
+  const numbered = book.items.filter((item) => /^再走走\d+$/.test(item.title));
+  if (numbered.length > 0) return `${label} 出现了编号占位：${numbered.map((item) => item.title).join("、")}`;
+  return null;
+}
+
+function assertDayFiveSight(book: Roadbook, label: string): string | null {
+  const sights = book.items.filter((item) => item.dayIndex === 5 && item.type === "景点");
+  if (sights.length === 0) return `${label} 第 5 天应有景点`;
+  const bad = sights.filter(
+    (item) => !BEIJING_SIGHTS.some((name) => item.title.includes(name)) && !SIGHT_FILLERS.includes(item.title),
+  );
+  if (bad.length > 0) return `${label} 第 5 天景点不对：${bad.map((item) => item.title).join("、")}`;
+  return null;
+}
+
+function assertHopBeforeBreakfast(book: Roadbook, label: string): string | null {
+  const ride = firstOutbound(book);
+  const breakfast = book.items.find((item) => item.dayIndex === 1 && item.type === "餐");
+  if (!ride || !breakfast) return `${label} 应有去程和早餐`;
+  const end = (parseTime(ride.startTime) ?? 0) + ride.durationMinutes;
+  const start = parseTime(breakfast.startTime) ?? 0;
+  if (ride.durationMinutes >= 90) return `${label} 沪苏应远小于 90 分钟，得到 ${ride.durationMinutes}`;
+  if (end > start) return `${label} 去程 ${ride.startTime}+${ride.durationMinutes} 应在早餐 ${breakfast.startTime} 之前结束`;
+  return null;
+}
+
+function assertConfirmedFixes(): string | null {
+  const now = new Date("2026-11-09T02:00:00.000Z");
+  let n = 0;
+  const random = () => `f${(n += 1)}`;
+
+  const wuzhenBrief = "周六从杭州去乌镇";
+  const wuzhenRules = buildDraft(wuzhenBrief, { id: "fix-wz-rules", now, random });
+  const wuzhenDirty = bookFromExtract(
+    {
+      kind: "旅游",
+      origin: "杭州",
+      destination: { city: "嘉兴", area: null },
+      startDate: "2026-11-14",
+      endDate: "2026-11-16",
+      party: null,
+      outbound: { date: "2026-11-14", time: null, mode: "其他", from: "杭州", to: "乌镇" },
+      inbound: null,
+      fixed: [],
+      lodging: null,
+      interests: ["乌镇"],
+      pace: null,
+      budget: null,
+      missing: [],
+    },
+    wuzhenBrief,
+    now,
+    "fix-wz-dirty",
+  );
+  if (typeof wuzhenDirty === "string") return wuzhenDirty;
+  const wuzhenRide = assertSharedRide(wuzhenRules, wuzhenDirty, "杭州", "乌镇脏去程");
+  if (wuzhenRide) return wuzhenRide;
+  const wuzhenOut = firstOutbound(wuzhenRules);
+  if (!wuzhenOut || wuzhenOut.durationMinutes >= 90) {
+    return `乌镇应沿用杭州到嘉兴的短途估计，得到 ${wuzhenOut?.durationMinutes}`;
+  }
+
+  const suBrief = "明天从上海去苏州，当天回";
+  const suRules = buildDraft(suBrief, { id: "fix-su-rules", now, random });
+  const suDirty = bookFromExtract(
+    looseExtract("苏州", "上海", "2026-11-10", "2026-11-10", {
+      outbound: { date: "2026-11-10", time: null, mode: null, from: null, to: null },
+      inbound: { date: "2026-11-10", time: null, mode: null, from: null, to: null },
+    }),
+    suBrief,
+    now,
+    "fix-su-null",
+  );
+  if (typeof suDirty === "string") return suDirty;
+  const suRide = assertSharedRide(suRules, suDirty, "上海", "沪苏空路段");
+  if (suRide) return suRide;
+  if ((firstOutbound(suRules)?.durationMinutes ?? 0) >= 90) return "沪苏空路段不应退回 120 分钟";
+
+  const cdBrief = "下周三到周五从北京去成都出差，周四下午2点开会";
+  const cdRules = buildDraft(cdBrief, { id: "fix-cd-rules", now, random });
+  const cdOut = cdRules.items.find(
+    (item) => item.dayIndex === 1 && item.type === "交通" && item.title.includes("北京") && item.title.includes("成都"),
+  );
+  const cdBack = cdRules.items.find((item) => item.dayIndex === 3 && item.type === "交通" && item.title === "返回北京");
+  if (!cdOut || cdOut.startTime !== "08:00" || cdOut.locked) {
+    return `成都出差应有未锁定的第 1 天 08:00 去程，得到 ${cdOut?.title ?? "无"} ${cdOut?.startTime} locked=${cdOut?.locked}`;
+  }
+  if (
+    !cdBack ||
+    cdOut.travelEstimateMinutes == null ||
+    cdOut.travelEstimateMinutes !== cdBack.travelEstimateMinutes ||
+    cdOut.travelEstimateMinutes <= 180
+  ) {
+    return `京蓉估计应两边同长且长于 180，得到 ${cdOut.travelEstimateMinutes}/${cdBack?.travelEstimateMinutes}`;
+  }
+  if (cdOut.durationMinutes !== cdOut.travelEstimateMinutes) {
+    return `08:00 的京蓉去程应放下整段估计，得到 ${cdOut.durationMinutes} / 估计 ${cdOut.travelEstimateMinutes}`;
+  }
+  if (cdBack.durationMinutes > cdOut.travelEstimateMinutes || cdBack.startTime !== "18:00") {
+    return `返程应在 18:00，日历时长不超过估计，得到 ${cdBack.startTime} ${cdBack.durationMinutes}`;
+  }
+  const meeting = cdRules.items.find((item) => item.title.includes("开会"));
+  if (!meeting || meeting.dayIndex !== 2 || meeting.startTime !== "14:00") {
+    return `开会应仍在第 2 天 14:00，得到第 ${meeting?.dayIndex} 天 ${meeting?.startTime}`;
+  }
+  const cdDirty = bookFromExtract(
+    {
+      kind: "办事",
+      origin: "北京",
+      destination: { city: "成都", area: null },
+      startDate: "2026-11-18",
+      endDate: "2026-11-20",
+      party: null,
+      outbound: { date: "2026-11-18", time: null, mode: null, from: null, to: null },
+      inbound: { date: "2026-11-20", time: null, mode: null, from: null, to: null },
+      fixed: [{ date: "2026-11-19", time: "14:00", endTime: null, title: "开会", place: "成都", type: "办事" }],
+      lodging: null,
+      interests: [],
+      pace: null,
+      budget: null,
+      missing: [],
+    },
+    cdBrief,
+    now,
+    "fix-cd-null",
+  );
+  if (typeof cdDirty === "string") return cdDirty;
+  const cdDirtyOut = firstOutbound(cdDirty);
+  const cdDirtyBack = returnRide(cdDirty, "北京");
+  if (
+    !cdDirtyOut ||
+    !cdDirtyBack ||
+    cdDirtyOut.travelEstimateMinutes !== cdOut.travelEstimateMinutes ||
+    cdDirtyBack.travelEstimateMinutes !== cdBack.travelEstimateMinutes ||
+    cdDirtyOut.durationMinutes !== cdOut.durationMinutes
+  ) {
+    return `成都空路段应与规则共用估计，得到 ${cdDirtyOut?.travelEstimateMinutes}/${cdDirtyBack?.travelEstimateMinutes}，规则 ${cdOut.travelEstimateMinutes}`;
+  }
+
+  for (const brief of ["从上海去北京玩5天", "从上海去北京玩2天"]) {
+    const rules = buildDraft(brief, { id: "fix-bj-rules", now, random });
+    const model = bookFromExtract(looseExtract("北京", "上海", "2026-11-10", null), brief, now, "fix-bj-model");
+    if (typeof model === "string") return `${brief} ${model}`;
+    const rulesArrival = assertAfterArrival(rules, `规则 ${brief}`);
+    if (rulesArrival) return rulesArrival;
+    const modelArrival = assertAfterArrival(model, `抽取 ${brief}`);
+    if (modelArrival) return modelArrival;
+    const rulesNumbered = assertNoNumberedFiller(rules, `规则 ${brief}`);
+    if (rulesNumbered) return rulesNumbered;
+    const modelNumbered = assertNoNumberedFiller(model, `抽取 ${brief}`);
+    if (modelNumbered) return modelNumbered;
+  }
+
+  const fiveRules = buildDraft("从上海去北京玩5天", { id: "fix-bj5-rules", now, random });
+  const fiveModel = bookFromExtract(looseExtract("北京", "上海", "2026-11-10", null), "从上海去北京玩5天", now, "fix-bj5-model");
+  if (typeof fiveModel === "string") return fiveModel;
+  const fiveRulesSight = assertDayFiveSight(fiveRules, "规则 北京5天");
+  if (fiveRulesSight) return fiveRulesSight;
+  const fiveModelSight = assertDayFiveSight(fiveModel, "抽取 北京5天");
+  if (fiveModelSight) return fiveModelSight;
+  if (fiveRules.items.some((item) => item.title.startsWith("返回")) || fiveModel.items.some((item) => item.title.startsWith("返回"))) {
+    return "北京 5 天不应推断返程";
+  }
+
+  const hopBrief = "从上海去苏州玩2天";
+  const hopRules = buildDraft(hopBrief, { id: "fix-hop-rules", now, random });
+  const hopModel = bookFromExtract(looseExtract("苏州", "上海", "2026-11-10", null), hopBrief, now, "fix-hop-model");
+  if (typeof hopModel === "string") return hopModel;
+  const hopRulesMeal = assertHopBeforeBreakfast(hopRules, "规则 沪苏");
+  if (hopRulesMeal) return hopRulesMeal;
+  const hopModelMeal = assertHopBeforeBreakfast(hopModel, "抽取 沪苏");
+  if (hopModelMeal) return hopModelMeal;
+  return null;
+}
+
 async function main(): Promise<void> {
   const parserError = assertParser();
   if (parserError) {
@@ -2217,6 +2442,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log("  ok day span, same-day guess, five-day extract");
+  const fixError = assertConfirmedFixes();
+  if (fixError) {
+    console.error(`fixes  ${fixError}`);
+    process.exit(1);
+  }
+  console.log("  ok shared rides, first-day arrival, filler titles");
   const extractError = await assertExtract();
   if (extractError) {
     console.error(`extract  ${extractError}`);

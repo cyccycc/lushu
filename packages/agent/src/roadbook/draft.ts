@@ -1,5 +1,5 @@
 import { guideFor, hasCityGuide, type Place } from "../cities";
-import { citiesInText, cityByName } from "@lushu/tools/place";
+import { citiesInText, cityByName, resolvePlaceToken } from "@lushu/tools/place";
 import { parseBrief, parseZhNumber, statedPartyCount } from "../parse";
 import { addDays, daysBetween, formatTime, inferStartDate, inferWeekdayDate, nextWeekMonday, parseTime, shanghaiDate, weekdayInWeek } from "./time";
 import type { Assumption, ItemType, Roadbook, RoadbookItem } from "./types";
@@ -34,6 +34,7 @@ const TEMPLATE_SIGHTS = new Set([
   "城区再走一段",
   "公园里坐一会儿",
   "附近随便走走",
+  "再走走",
   "城区走走",
 ]);
 
@@ -150,11 +151,50 @@ function claimSight(
   return again;
 }
 
-function fillerSight(used: Map<string, number>): Place {
-  const options = ["城区再走一段", "公园里坐一会儿", "附近随便走走"];
-  const name = options.find((item) => (used.get(item) ?? 0) === 0) ?? `再走走${used.size + 1}`;
+const NAMED_FILLERS = ["城区再走一段", "公园里坐一会儿", "附近随便走走"] as const;
+
+function fillerSight(used: Map<string, number>): Place | null {
+  const name = [...NAMED_FILLERS, "再走走"].find((item) => (used.get(item) ?? 0) === 0);
+  if (!name) return null;
   used.set(name, (used.get(name) ?? 0) + 1);
   return visitPlace(name, "赶时间可以整段拿掉。");
+}
+
+function lockedSight(items: RoadbookItem[], name: string): boolean {
+  const key = canonicalVisitName(name);
+  return items.some((item) => item.locked && item.type === "景点" && canonicalVisitName(item.title) === key);
+}
+
+/** Once every real daytime sight has been used, cycle those sights. A locked visit stays once. */
+function repeatRealSight(
+  pool: Place[],
+  used: Map<string, number>,
+  mustVisit: string | null,
+  items: RoadbookItem[],
+): Place | null {
+  let best: Place | null = null;
+  let bestCount = Number.POSITIVE_INFINITY;
+  for (const place of pool) {
+    if (isFullDay(place) || isHero(place, mustVisit) || lockedSight(items, place.name)) continue;
+    if (place.name === "再走走" || (NAMED_FILLERS as readonly string[]).includes(place.name)) continue;
+    const count = used.get(place.name) ?? 0;
+    if (count === 0 || count >= bestCount) continue;
+    best = place;
+    bestCount = count;
+  }
+  if (!best) return null;
+  used.set(best.name, bestCount + 1);
+  return best;
+}
+
+function takeSight(
+  pool: Place[],
+  used: Map<string, number>,
+  mustVisit: string | null,
+  allowRepeat: boolean,
+  items: RoadbookItem[],
+): Place | null {
+  return claimSight(pool, used, mustVisit, allowRepeat) ?? repeatRealSight(pool, used, mustVisit, items) ?? fillerSight(used);
 }
 
 function hoursLabel(minutes: number): string {
@@ -231,24 +271,25 @@ export function itemsForDay(
   const mustVisit = options.mustVisit ?? null;
   const allowRepeat = options.allowRepeat === true;
   const pool = sightPool(city, mustVisit);
-  const first = claimSight(pool, used, mustVisit, allowRepeat) ?? fillerSight(used);
   const placeName = city === "未写明的目的地" ? "待定" : city;
   const arriving = Boolean(options.origin) && dayIndex === 1;
   const returning = Boolean(options.origin && options.withReturn && dayIndex === dayCount);
-  if (isFullDay(first)) {
+  const lead = pool.find((place) => (used.get(place.name) ?? 0) === 0);
+  if (lead && isFullDay(lead)) {
+    claimSight(pool, used, mustVisit, allowRepeat);
     return fullDayItems(random, {
       dayIndex,
       placeName,
       guide,
-      place: first,
+      place: lead,
       mustVisit,
       origin: options.origin,
       arriving,
       returning,
     });
   }
-  const second = claimSight(pool, used, mustVisit, allowRepeat) ?? fillerSight(used);
   const items: RoadbookItem[] = [];
+  let floor: number | null = null;
   if (options.origin && dayIndex === 1 && options.origin !== placeName) {
     const ride = modeMinutes(null, options.origin, placeName);
     items.push(
@@ -267,118 +308,65 @@ export function itemsForDay(
         note: "时刻按出发理解。票和班次请自己查，路书不代订。",
       }),
     );
+    floor = alignTen(8 * 60 + ride);
   }
-  const morning = options.origin && dayIndex === 1 ? "10:00" : "09:00";
-  items.push(
-    item(random, {
-      dayIndex,
-      startTime: morning,
-      durationMinutes: 40,
-      title: guide.food[0] ?? "早餐",
-      place: placeName,
-      type: "餐",
-      status: "待做",
-      travelEstimateMinutes: 10,
-      locked: false,
-      priority: "想去",
-      indoor: true,
-    }),
-  );
-  const firstStart = options.origin && dayIndex === 1 ? "11:00" : "10:00";
-  const firstStartMin = parseTime(firstStart) ?? 10 * 60;
-  const lunchMin = 12 * 60 + 30;
-  const firstDuration = Math.min(120, Math.max(45, lunchMin - firstStartMin));
-  items.push(
-    item(random, {
-      dayIndex,
-      startTime: firstStart,
-      durationMinutes: firstDuration,
-      title: first.name,
-      place: `${placeName} · ${first.area}`,
-      type: "景点",
-      status: "待做",
-      travelEstimateMinutes: 20,
-      locked: false,
-      priority: sightPriority(first, mustVisit),
-      indoor: first.indoor,
-      note: first.detail,
-    }),
-  );
-  items.push(
-    item(random, {
-      dayIndex,
-      startTime: "12:30",
-      durationMinutes: 60,
-      title: guide.food[1] ?? "午餐",
-      place: placeName,
-      type: "餐",
-      status: "待做",
-      travelEstimateMinutes: 15,
-      locked: false,
-      priority: "想去",
-      indoor: true,
-    }),
-  );
-  if (dayIndex === dayCount && options.withReturn && options.origin) {
-    items.push(
+  const late = floor != null && floor > 16 * 60;
+  let cursor = 0;
+  const placeAt = (preferred: number, duration: number, build: (start: string) => RoadbookItem) => {
+    const startMin = alignTen(Math.max(preferred, floor ?? 0, cursor));
+    if (startMin >= DAY_LIMIT) return;
+    items.push(build(formatTime(startMin)));
+    cursor = startMin + duration;
+  };
+  const sightAt = (place: Place, preferred: number, duration: number) => {
+    placeAt(preferred, duration, (start) =>
       item(random, {
         dayIndex,
-        startTime: "17:00",
-        durationMinutes: 60,
-        title: "去车站",
-        place: `${placeName} · 车站`,
-        type: "交通",
-        status: "待做",
-        travelEstimateMinutes: 60,
-        locked: false,
-        priority: "必去",
-        indoor: true,
-        note: "返程前预留 60 分钟去车站，时刻是推断。",
-        source: inferredSource("返程前预留去车站的时间"),
-      }),
-    );
-    items.push(inferredReturnItem(random, dayIndex, options.origin, placeName, null));
-  } else {
-    items.push(
-      item(random, {
-        dayIndex,
-        startTime: "14:00",
-        durationMinutes: 100,
-        title: second.name,
-        place: `${placeName} · ${second.area}`,
+        startTime: start,
+        durationMinutes: duration,
+        title: place.name,
+        place: `${placeName} · ${place.area}`,
         type: "景点",
         status: "待做",
         travelEstimateMinutes: 20,
         locked: false,
-        priority: sightPriority(second, mustVisit),
-        indoor: second.indoor,
-        note: second.detail,
+        priority: sightPriority(place, mustVisit),
+        indoor: place.indoor,
+        note: place.detail,
       }),
     );
-    items.push(
+  };
+  if (floor == null || floor <= 9 * 60 + 30) {
+    placeAt(options.origin && dayIndex === 1 ? 10 * 60 : 9 * 60, 40, (start) =>
       item(random, {
         dayIndex,
-        startTime: "16:00",
-        durationMinutes: 70,
-        title: "可砍的闲逛",
+        startTime: start,
+        durationMinutes: 40,
+        title: guide.food[0] ?? "早餐",
         place: placeName,
-        type: "自由",
+        type: "餐",
         status: "待做",
         travelEstimateMinutes: 10,
         locked: false,
-        priority: "可砍",
-        indoor: false,
-        note: "赶时间或累了就整段拿掉。",
+        priority: "想去",
+        indoor: true,
       }),
     );
   }
-  if (!(dayIndex === dayCount && options.withReturn && options.origin)) {
-    items.push(
+  const lunchAt = 12 * 60 + 30;
+  if (!late) {
+    const morningPreferred = options.origin && dayIndex === 1 ? 11 * 60 : 10 * 60;
+    const morningStart = alignTen(Math.max(morningPreferred, floor ?? 0, cursor));
+    if (lunchAt - morningStart >= 40) {
+      const morning = takeSight(pool, used, mustVisit, allowRepeat, items);
+      if (morning) sightAt(morning, morningStart, Math.min(120, lunchAt - morningStart));
+    }
+    placeAt(lunchAt, 60, (start) =>
       item(random, {
         dayIndex,
-        startTime: "18:00",
-        durationMinutes: 70,
-        title: guide.food[2] ?? "晚饭",
+        startTime: start,
+        durationMinutes: 60,
+        title: guide.food[1] ?? "午餐",
         place: placeName,
         type: "餐",
         status: "待做",
@@ -388,22 +376,96 @@ export function itemsForDay(
         indoor: true,
       }),
     );
-    items.push(
-      item(random, {
-        dayIndex,
-        startTime: "19:20",
-        durationMinutes: 100,
-        title: "可砍的夜走",
-        place: placeName,
-        type: "自由",
-        status: "待做",
-        travelEstimateMinutes: 10,
-        locked: false,
-        priority: "可砍",
-        indoor: false,
-        note: "晚了就先砍这一段。",
-      }),
-    );
+  }
+  if (returning && options.origin) {
+    const backStart = 18 * 60;
+    if (floor == null || backStart >= floor) {
+      const stationStart = backStart - 60;
+      if ((floor == null || stationStart >= floor) && stationStart >= cursor) {
+        items.push(
+          item(random, {
+            dayIndex,
+            startTime: formatTime(stationStart),
+            durationMinutes: 60,
+            title: "去车站",
+            place: `${placeName} · 车站`,
+            type: "交通",
+            status: "待做",
+            travelEstimateMinutes: 60,
+            locked: false,
+            priority: "必去",
+            indoor: true,
+            note: "返程前预留 60 分钟去车站，时刻是推断。",
+            source: inferredSource("返程前预留去车站的时间"),
+          }),
+        );
+      }
+      items.push(inferredReturnItem(random, dayIndex, options.origin, placeName, null));
+    }
+    return items;
+  }
+  const dinnerAt = 18 * 60;
+  if (!late) {
+    const afternoonStart = alignTen(Math.max(14 * 60, floor ?? 0, cursor));
+    if (dinnerAt - afternoonStart >= 40) {
+      const afternoon = takeSight(pool, used, mustVisit, allowRepeat, items);
+      if (afternoon) sightAt(afternoon, afternoonStart, Math.min(100, dinnerAt - afternoonStart));
+    }
+    const strollStart = alignTen(Math.max(16 * 60, floor ?? 0, cursor));
+    if (dinnerAt - strollStart >= 70) {
+      placeAt(16 * 60, 70, (start) =>
+        item(random, {
+          dayIndex,
+          startTime: start,
+          durationMinutes: 70,
+          title: "可砍的闲逛",
+          place: placeName,
+          type: "自由",
+          status: "待做",
+          travelEstimateMinutes: 10,
+          locked: false,
+          priority: "可砍",
+          indoor: false,
+          note: "赶时间或累了就整段拿掉。",
+        }),
+      );
+    }
+  }
+  placeAt(dinnerAt, 70, (start) =>
+    item(random, {
+      dayIndex,
+      startTime: start,
+      durationMinutes: 70,
+      title: guide.food[2] ?? "晚饭",
+      place: placeName,
+      type: "餐",
+      status: "待做",
+      travelEstimateMinutes: 15,
+      locked: false,
+      priority: "想去",
+      indoor: true,
+    }),
+  );
+  if (!late) {
+    const nightStart = alignTen(Math.max(19 * 60 + 20, floor ?? 0, cursor));
+    if (nightStart + 100 <= DAY_LIMIT) {
+      placeAt(19 * 60 + 20, 100, (start) =>
+        item(random, {
+          dayIndex,
+          startTime: start,
+          durationMinutes: 100,
+          title: "可砍的夜走",
+          place: placeName,
+          type: "自由",
+          status: "待做",
+          travelEstimateMinutes: 10,
+          locked: false,
+          priority: "可砍",
+          indoor: false,
+          note: "晚了就先砍这一段。",
+        }),
+      );
+    }
   }
   return items;
 }
@@ -425,6 +487,7 @@ function fullDayItems(
   const durationMinutes = arriving && returning ? 330 : arriving || returning ? 360 : 420;
   const mountain = place.name.endsWith("山");
   const items: RoadbookItem[] = [];
+  let floor: number | null = null;
   if (arriving && origin && origin !== placeName) {
     const ride = modeMinutes(null, origin, placeName);
     items.push(
@@ -443,6 +506,100 @@ function fullDayItems(
         note: "时刻按出发理解。票和班次请自己查，路书不代订。",
       }),
     );
+    floor = alignTen(6 * 60 + 30 + ride);
+  }
+  const breakfastMin = arriving ? 8 * 60 + 10 : 7 * 60;
+  if (floor != null && floor > breakfastMin) {
+    let cursor = floor;
+    if (floor <= 9 * 60 + 30) {
+      const breakfastStart = alignTen(floor);
+      items.push(
+        item(random, {
+          dayIndex,
+          startTime: formatTime(breakfastStart),
+          durationMinutes: 30,
+          title: guide.food[0] ?? "早餐",
+          place: placeName,
+          type: "餐",
+          status: "待做",
+          travelEstimateMinutes: 10,
+          locked: false,
+          priority: "想去",
+          indoor: true,
+          note: "出发前吃完，不要把正餐留在景区门口。",
+        }),
+      );
+      cursor = breakfastStart + 30;
+    }
+    if (cursor <= 16 * 60) {
+      const climbAt = alignTen(cursor);
+      const room = Math.max(40, (returning ? 17 * 60 : 18 * 60) - climbAt);
+      const span = Math.min(durationMinutes, room);
+      items.push(
+        item(random, {
+          dayIndex,
+          startTime: formatTime(climbAt),
+          durationMinutes: span,
+          title: place.name,
+          place: `${placeName} · ${place.area}`,
+          type: "景点",
+          status: "待做",
+          travelEstimateMinutes: 20,
+          locked: false,
+          priority: sightPriority(place, mustVisit),
+          indoor: place.indoor,
+          note: mountain
+            ? `登${place.name}按一整天排，大约 ${hoursLabel(span)} 小时，含上下山。开放时间和路线请出发前核实。`
+            : `${place.name}按一整天排，大约 ${hoursLabel(span)} 小时，这一天不再叠别的景点。开放时间请出发前核实。`,
+        }),
+      );
+    }
+    if (returning && origin) {
+      const backStart = 18 * 60;
+      if (backStart >= floor) {
+        const stationStart = backStart - 60;
+        if (stationStart >= floor) {
+          items.push(
+            item(random, {
+              dayIndex,
+              startTime: formatTime(stationStart),
+              durationMinutes: 60,
+              title: "去车站",
+              place: `${placeName} · 车站`,
+              type: "交通",
+              status: "待做",
+              travelEstimateMinutes: 60,
+              locked: false,
+              priority: "必去",
+              indoor: true,
+              note: "返程前预留 60 分钟去车站，时刻是推断。",
+              source: inferredSource("返程前预留去车站的时间"),
+            }),
+          );
+        }
+        items.push(inferredReturnItem(random, dayIndex, origin, placeName, null));
+      }
+    } else {
+      const dinnerStart = alignTen(Math.max(18 * 60, floor));
+      if (dinnerStart < DAY_LIMIT) {
+        items.push(
+          item(random, {
+            dayIndex,
+            startTime: formatTime(dinnerStart),
+            durationMinutes: 70,
+            title: guide.food[2] ?? "晚饭",
+            place: placeName,
+            type: "餐",
+            status: "待做",
+            travelEstimateMinutes: 15,
+            locked: false,
+            priority: "想去",
+            indoor: true,
+          }),
+        );
+      }
+    }
+    return items;
   }
   const climbStart = arriving ? "08:50" : "07:40";
   items.push(
@@ -609,6 +766,10 @@ export type DraftSpec = {
 
 const DAY_START = 8 * 60;
 const DAY_LIMIT = 21 * 60 + 30;
+
+function alignTen(minutes: number): number {
+  return Math.ceil(minutes / 10) * 10;
+}
 /** Climbs and stated morning clocks can start before the usual 08:00. */
 const EARLY_FLOOR = 5 * 60;
 const CLIMB_MINUTES = 7 * 60;
@@ -1041,7 +1202,8 @@ function attachTransport(spec: DraftSpec, text: string, now: Date): void {
   const origin = spec.origin;
   const city = spec.city;
   if (!origin || city === "未写明的目的地" || city === origin) return;
-  if (!/高铁|动车|飞机|航班|火车|自驾|开车|返程|返回|回来|当天回|当日往返|出发/.test(text)) return;
+  // Attach whenever the two cities differ. 出差 and 「从A去B」 do not need 高铁 or 出发.
+  // A clock is written onto the leg only when it sits beside 出发 or a ride word.
   const clocks = clocksIn(text).filter((hit) => !hit.arrival && !hit.rangeEnd);
   const mode = modeOf(text);
   const goAt = text.search(/高铁|动车|飞机|航班|出发|去往|前往/);
@@ -1454,11 +1616,16 @@ function haversineKm(a: [number, number], b: [number, number]): number {
   return 2 * 6371 * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
+function coordCity(raw: string): string {
+  const stripped = raw.trim().replace(/市$/u, "");
+  return resolvePlaceToken(stripped) ?? stripped;
+}
+
 /** Short HSR hops are much less than 3 hours. Longer pairs stay above the old flat 180. */
 function hsrMinutes(from: string | null, to: string | null): number | null {
   if (!from || !to) return null;
-  const start = CITY_COORD[from.replace(/市$/u, "")];
-  const end = CITY_COORD[to.replace(/市$/u, "")];
+  const start = CITY_COORD[coordCity(from)];
+  const end = CITY_COORD[coordCity(to)];
   if (!start || !end) return null;
   const km = haversineKm(start, end);
   const minutes = km < 150 ? 20 + km * 0.28 : 30 + (km / 220) * 60;
@@ -1470,8 +1637,8 @@ function modeMinutes(mode: DraftLeg["mode"], from?: string | null, to?: string |
   if (mode === "自驾") return 240;
   const ride = hsrMinutes(from ?? null, to ?? null);
   if (mode === "高铁") return ride ?? 240;
-  // An empty mode still shares the city-pair estimate. Do not flatten to 120 when the coordinates are known.
-  if (mode == null && ride != null) return ride;
+  // Empty mode and 「其他」 share the city-pair estimate. Do not flatten to 120 when the coordinates are known.
+  if ((mode == null || mode === "其他") && ride != null) return ride;
   return 120;
 }
 
@@ -1614,10 +1781,17 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
   const outboundMark: { day: number; end: number }[] = [];
   const inboundMark: { day: number; start: number }[] = [];
 
-  const pushLeg = (leg: DraftLeg, day: number, title: string, place: string, statedTime = Boolean(leg.time)) => {
+  const pushLeg = (
+    leg: DraftLeg,
+    day: number,
+    title: string,
+    place: string,
+    endpoints: { from: string | null; to: string | null },
+    statedTime = Boolean(leg.time),
+  ) => {
     if (selfTrip(title)) return;
     const time = leg.time ?? "08:00";
-    const ride = modeMinutes(leg.mode, leg.from, leg.to);
+    const ride = modeMinutes(leg.mode, endpoints.from, endpoints.to);
     let duration = clampDuration(time, ride);
     let arriveNote = "";
     if (leg === spec.outbound && leg.time && leg.arriveTime) {
@@ -1685,7 +1859,7 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
         outboundMark.push({ day, end: startMin + duration });
       }
     } else if (from && to && from !== to) {
-      pushLeg(spec.outbound, day, `从${from}前往${to}`, from);
+      pushLeg(spec.outbound, day, `从${from}前往${to}`, from, { from, to });
       if (spec.outbound.arriveTime) {
         const arrive = parseTime(spec.outbound.arriveTime);
         const mark = outboundMark.find((entry) => entry.day === day);
@@ -1702,7 +1876,7 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
       const stated = Boolean(statedClock && spec.inbound.time === statedClock);
       const time = stated ? spec.inbound.time ?? "18:00" : "18:00";
       if (stated) {
-        pushLeg({ ...spec.inbound, time }, day, `从${from}前往${to}`, from, true);
+        pushLeg({ ...spec.inbound, time }, day, `从${from}前往${to}`, from, { from, to }, true);
       } else {
         const ride = inferredReturnItem(
           random,
@@ -1828,6 +2002,22 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
       return true;
     };
     if (spec.kind === "旅游") {
+      if (earliest > 16 * 60) {
+        addAt(18 * 60, 70, {
+          dayIndex: day,
+          startTime: "18:00",
+          durationMinutes: 70,
+          title: guide.food[2] ?? "晚饭",
+          place: mealPlace,
+          type: "餐",
+          status: "待做",
+          travelEstimateMinutes: 15,
+          locked: false,
+          priority: "想去",
+          indoor: true,
+        });
+        continue;
+      }
       let placedToday = 0;
       const sightFields = (place: Place, interest: boolean) => {
         const copy = describeSight(place, spec, unknown);
@@ -1893,8 +2083,8 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
         if (addAt(Math.max(earliest, 14 * 60), 100, sightFields(second, interest))) placedToday += 1;
       }
       if (!climbAlready && placedToday === 0 && latest - earliest >= 90) {
-        const filler = fillerSight(used);
-        if (!visitPlaced(items, filler.name) && addAt(Math.max(earliest, 10 * 60), 100, sightFields(filler, false))) {
+        const filler = repeatRealSight(pool, used, spec.interests[0] ?? spec.landmark, items) ?? fillerSight(used);
+        if (filler && addAt(Math.max(earliest, 10 * 60), 100, sightFields(filler, false))) {
           placedToday += 1;
         }
       }
