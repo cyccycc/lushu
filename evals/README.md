@@ -15,4 +15,4 @@ Fixtures live in `fixtures/`. Add a JSON file; the runner picks up every `*.json
 - `extract-bad.json` — same city, dates outside the window, and broken JSON fall back to a question or the rule parser.
 - `sentences.json` — offline stand-ins for the six live sentences.
 
-`pnpm eval:live` also sends those six sentences through the real extractor (`extractBrief`) when `LLM_API_KEY` is set. The offline fixtures above cover the same assertions without calling a model. The rule parser, with no key, must read the Jinan sentence as Jinan or ask which city — never as a Shanghai trip.
+`pnpm eval:live` sends those sentences through the real extractor (`extractBrief`) when `LLM_API_KEY` is set, and also checks「周六从杭州去乌镇」. Offline fixtures cover the same assertions without calling a model. 「想去爬泰山」must come out as Tai'an, one must-go climb of 5–8 hours, not merely a title that contains 泰山. The rule parser, with no key, must read the Jinan sentence as Jinan or ask which city — never as a Shanghai trip.

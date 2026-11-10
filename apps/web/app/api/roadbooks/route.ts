@@ -1,4 +1,4 @@
-import { buildDraftFromSpec, forecastDaysThrough, normalizeWeatherQuery, replaceWeather, snapsFromReport, specForQuestion, specFromExtract, specFromRules } from "@lushu/agent/roadbook";
+import { buildDraftFromSpec, citeRetrievedSights, forecastDaysThrough, normalizeWeatherQuery, replaceWeather, snapsFromReport, specForQuestion, specFromExtract, specFromRules } from "@lushu/agent/roadbook";
 import { extractBrief, validateExtract, type TripExtract } from "@lushu/agent/roadbook-server";
 import { getWeather, webSearch } from "@lushu/tools";
 import { gateOpen, passwordConfigured } from "@/lib/gate";
@@ -90,24 +90,14 @@ export async function POST(request: Request) {
     ]);
     book = replaceWeather(book, snapsFromReport(weather, book.city, now.toISOString()), now);
     const hit = search && !search.stub ? search.results.find((item) => item.url) : undefined;
-    if (hit?.url) {
-      book = {
-        ...book,
-        items: book.items.map((item, index) =>
-          index === book.items.findIndex((entry) => entry.type === "景点")
-            ? {
-                ...item,
-                source: {
-                  kind: "检索" as const,
-                  url: hit.url ?? undefined,
-                  fetchedAt: now.toISOString(),
-                  note: hit.title,
-                },
-              }
-            : item,
-        ),
-      };
-    }
+    book = {
+      ...book,
+      items: citeRetrievedSights(
+        book.items,
+        hit?.url ? { title: hit.title, url: hit.url } : null,
+        now.toISOString(),
+      ),
+    };
   } else {
     book = replaceWeather(book, snapsFromReport(null, book.city, now.toISOString()), now);
   }

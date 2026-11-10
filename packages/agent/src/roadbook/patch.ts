@@ -162,6 +162,12 @@ function lockedUpdateError(item: RoadbookItem, fields: ItemFields): string | nul
   return null;
 }
 
+function rewritePlacedNote(note: string | undefined, startTime: string): string | undefined {
+  if (!note) return note;
+  const next = note.replace(/先放在\s*\d{2}:\d{2}/g, `先放在 ${startTime}`);
+  return next === note ? note : next;
+}
+
 function applyFields(item: RoadbookItem, fields: ItemFields): string | null {
   if (fields.dayIndex != null) {
     if (!Number.isInteger(fields.dayIndex) || fields.dayIndex < 1 || fields.dayIndex > 14) return "日序无效。";
@@ -233,6 +239,10 @@ function applyFields(item: RoadbookItem, fields: ItemFields): string | null {
   if (fields.locked != null) item.locked = fields.locked === true;
   if (fields.indoor != null) item.indoor = fields.indoor === true;
   if (fields.note != null) item.note = fields.note.slice(0, 300);
+  if (fields.startTime != null && fields.note == null) {
+    const next = rewritePlacedNote(item.note, item.startTime);
+    if (next != null) item.note = next;
+  }
   return null;
 }
 
@@ -269,6 +279,8 @@ function resolveDay(group: RoadbookItem[], touched: Set<string>): string | null 
     const formatted = formatTime(start);
     if (formatted !== item.startTime) {
       item.startTime = formatted;
+      const next = rewritePlacedNote(item.note, formatted);
+      if (next != null) item.note = next;
       touched.add(item.id);
     }
     placed.push({ start, end: start + item.durationMinutes });
@@ -341,6 +353,8 @@ function applyOps(items: RoadbookItem[], ops: PatchOp[], touched: Set<string>): 
       if (!item || !slot || item.locked) continue;
       if (item.startTime !== slot) {
         item.startTime = slot;
+        const next = rewritePlacedNote(item.note, slot);
+        if (next != null) item.note = next;
         touched.add(item.id);
       }
     }
