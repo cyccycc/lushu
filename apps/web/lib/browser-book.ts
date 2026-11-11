@@ -21,6 +21,23 @@ export function rememberBook(entry: RecentBook): void {
   localStorage.setItem("lushu.recent", JSON.stringify(next));
 }
 
+/** Overwrite lushu.recent. Does not read or merge the previous list. */
+export function replaceRecent(entries: readonly RecentBook[]): void {
+  localStorage.setItem("lushu.recent", JSON.stringify(entries));
+}
+
+/**
+ * Books from a successful list response that should replace the local cache.
+ * Null means this payload is not an authoritative list (locked placeholder, or no books array).
+ * An empty array is authoritative and must clear the cache.
+ */
+export function recentReplacement<T extends RecentBook>(
+  data: { books?: T[] | null; listLocked?: boolean } | null | undefined,
+): T[] | null {
+  if (!data || data.listLocked || !Array.isArray(data.books)) return null;
+  return data.books;
+}
+
 export function readCachedBook(id: string): Roadbook | null {
   try {
     const raw = localStorage.getItem(`lushu.book.${id}`);

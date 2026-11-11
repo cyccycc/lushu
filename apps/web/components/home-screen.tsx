@@ -4,9 +4,20 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import { KeySettings } from "@/components/key-settings";
-import { llmRequestHeaders, readRecent, rememberBook, type RecentBook } from "@/lib/browser-book";
+import { llmRequestHeaders, readRecent, recentReplacement, rememberBook, replaceRecent, type RecentBook } from "@/lib/browser-book";
 
 type Listed = RecentBook & { brief?: string };
+
+/** Successful GET /api/roadbooks. Failed and unauthorized responses return null and do not touch lushu.recent. */
+async function pullAuthoritativeRecent(): Promise<{ listLocked: boolean; books: Listed[] | null } | null> {
+  const listed = await fetch("/api/roadbooks", { cache: "no-store" }).catch(() => null);
+  if (!listed?.ok) return null;
+  const data = (await listed.json().catch(() => null)) as { books?: Listed[]; listLocked?: boolean } | null;
+  if (!data) return null;
+  const books = recentReplacement(data);
+  if (books !== null) replaceRecent(books);
+  return { listLocked: Boolean(data.listLocked), books };
+}
 
 export function HomeScreen() {
   const router = useRouter();
@@ -30,17 +41,10 @@ export function HomeScreen() {
       setRequired(Boolean(access.required));
       setUnlocked(Boolean(access.ok));
       if (access.required && access.ok) {
-        const listed = await fetch("/api/roadbooks", { cache: "no-store" });
-        if (!listed.ok) return;
-        const data = (await listed.json()) as { books?: Listed[]; listLocked?: boolean };
-        if (cancel) return;
-        setListLocked(Boolean(data.listLocked));
-        if (data.books && data.books.length > 0) {
-          for (const book of data.books) {
-            if (book.accessKey) rememberBook(book);
-          }
-          setRecent(data.books);
-        }
+        const synced = await pullAuthoritativeRecent();
+        if (cancel || !synced) return;
+        setListLocked(synced.listLocked);
+        if (synced.books !== null) setRecent(synced.books);
       } else {
         setListLocked(!access.required);
       }
@@ -69,12 +73,10 @@ export function HomeScreen() {
     }
     setPassword("");
     setUnlocked(true);
-    const listed = await fetch("/api/roadbooks", { cache: "no-store" });
-    if (listed.ok) {
-      const data = (await listed.json()) as { books?: Listed[] };
-      setRecent(data.books ?? []);
-      setListLocked(false);
-    }
+    const synced = await pullAuthoritativeRecent();
+    if (!synced) return;
+    setListLocked(synced.listLocked);
+    if (synced.books !== null) setRecent(synced.books);
   }
 
   async function create(event: FormEvent) {
