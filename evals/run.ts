@@ -19,6 +19,7 @@ import {
   type PlanVariant,
 } from "@lushu/agent";
 import {
+  addDays,
   applyPatch,
   buildDraft,
   buildDraftFromSpec,
@@ -2482,21 +2483,22 @@ function assertConfirmedFixes(): string | null {
     if (lateBreakfast) return `${label} 泰山不应把早餐放到 ${lateBreakfast.startTime}`;
     const depart = book.items.find((item) => item.type === "交通" && item.title.includes("前往"));
     const departAt = parseTime(depart?.startTime ?? "") ?? 0;
+    const arrived = departAt + (depart?.durationMinutes ?? 0);
     const climb = book.items.find((item) => item.type === "景点" && item.title.includes("泰山"));
     const climbAt = parseTime(climb?.startTime ?? "") ?? 0;
     const breakfast = book.items.find((item) => item.dayIndex === 1 && item.title.includes("早餐"));
-    if (breakfast) {
-      const at = parseTime(breakfast.startTime) ?? 0;
-      if (climbAt >= 9 * 60 + 30) {
-        const arrived = departAt + (depart?.durationMinutes ?? 0);
-        if (at < arrived || at + breakfast.durationMinutes > climbAt) {
-          return `${label} 早餐应在到达之后、开爬之前，得到 ${breakfast.place} ${breakfast.startTime}，爬 ${climb?.startTime}`;
-        }
-      } else if (!breakfast.place.includes("济南") || at >= departAt) {
-        return `${label} 早餐应在济南出发前，或这一天不排，得到 ${breakfast.place} ${breakfast.startTime}`;
-      }
+    if (!breakfast) return `${label} 早到之后应吃早餐，而不是直接开爬`;
+    const at = parseTime(breakfast.startTime) ?? 0;
+    if (at < arrived || at < 7 * 60) {
+      return `${label} 早餐应在到达之后，并且不早于 07:00，得到 ${breakfast.place} ${breakfast.startTime}`;
     }
-    const climbEnd = climb ? climbAt + climb.durationMinutes : 0;
+    if (arrived <= 7 * 60 && at !== 7 * 60) {
+      return `${label} 到达早于 07:00 时早餐应在 07:00，得到 ${breakfast.startTime}`;
+    }
+    if (at + breakfast.durationMinutes !== climbAt) {
+      return `${label} 开爬应紧接早餐，得到 ${breakfast.startTime}+${breakfast.durationMinutes} 爬 ${climb?.startTime}`;
+    }
+    const climbEnd = climbAt + (climb?.durationMinutes ?? 0);
     const after = book.items.filter((item) => item.dayIndex === 1 && item.type === "餐" && (parseTime(item.startTime) ?? 0) >= climbEnd);
     if (after.some((item) => item.title.includes("早餐"))) return `${label} 爬完不应再叫早餐`;
   }
@@ -2620,6 +2622,16 @@ function assertUserFixes(): string | null {
   if (wuzhenBack?.startTime !== "16:00" || !wuzhenBack.locked) {
     return `乌镇返程应钉在 16:00，得到 ${wuzhenBack?.startTime} locked=${wuzhenBack?.locked}`;
   }
+  if (wuzhenBack.source.note !== "你改的时间") return `改过的返程来源应是你改的时间，得到 ${wuzhenBack.source.note}`;
+  if (wuzhenBack.note?.includes("原话没提返程")) return `改过的返程不应再写原话没提：${wuzhenBack.note}`;
+  if (!wuzhenBack.note?.includes("你改")) return `改过的返程应写明钟点是你改的：${wuzhenBack.note}`;
+  const wuzhenReturnTag = wuzhenPlan.book.assumptions.find((item) => item.key === "return");
+  if (wuzhenReturnTag?.inferred || wuzhenReturnTag?.value !== "你改到第 3 天 16:00") {
+    return `返程假设应是你改到第 3 天 16:00，得到 ${wuzhenReturnTag?.value} inferred=${wuzhenReturnTag?.inferred}`;
+  }
+  const askDays = planMessage(wuzhenPlan.book, "改成2天", random, now);
+  if (askDays.request) return "锁定返程后改成 2 天应先问，不应直接挪";
+  if (!askDays.note.includes("要先改返程吗")) return `锁定返程后改天数应先问：${askDays.note}`;
   if (wuzhenStation?.startTime !== "15:00") return `乌镇去车站应在 15:00，得到 ${wuzhenStation?.startTime}`;
   const wuzhenSpill = spillAfter(
     wuzhenPlan.book,
@@ -2891,17 +2903,97 @@ function assertUserFixes(): string | null {
   if (!dawnRide || dawnRide.startTime !== "06:00" || !dawnClimb) return "泰山早出发用例缺少去程或爬山";
   const arrived = (parseTime(dawnRide.startTime) ?? 0) + dawnRide.durationMinutes;
   if (arrived < 6 * 60 + 20 || arrived > 6 * 60 + 50) return `到达应约 06:35，得到 ${formatTime(arrived)}`;
-  const climbAt = parseTime(dawnClimb.startTime) ?? 0;
-  if (climbAt < 9 * 60 + 30 || climbAt > 10 * 60 + 30) return `开爬应约 10:00，得到 ${dawnClimb.startTime}`;
   const breakfast = dawn.items.find((item) => item.dayIndex === 1 && (item.title.includes("早餐") || item.title.includes("早饭")));
-  if (!breakfast) return "06:35 到达、10:00 开爬之间应有早餐";
+  if (!breakfast) return "早到之后应先吃早餐";
   const breakfastAt = parseTime(breakfast.startTime) ?? 0;
-  if (breakfastAt < arrived || breakfastAt + breakfast.durationMinutes > climbAt) {
-    return `早餐应在到达之后、开爬之前，得到 ${breakfast.place} ${breakfast.startTime}（${breakfast.durationMinutes}）爬 ${dawnClimb.startTime}`;
+  if (breakfastAt < arrived || breakfastAt < 7 * 60) {
+    return `早餐应在到达之后且不早于 07:00，得到 ${breakfast.place} ${breakfast.startTime}`;
+  }
+  if (arrived <= 7 * 60 && breakfastAt !== 7 * 60) return `到达早于 07:00 时早餐应在 07:00，得到 ${breakfast.startTime}`;
+  const climbAt = parseTime(dawnClimb.startTime) ?? 0;
+  if (climbAt !== breakfastAt + breakfast.durationMinutes) {
+    return `开爬应紧接早餐，得到 ${breakfast.startTime}+${breakfast.durationMinutes} 爬 ${dawnClimb.startTime}`;
   }
   const climbEnd = climbAt + dawnClimb.durationMinutes;
   if (dawn.items.some((item) => item.dayIndex === 1 && item.type === "餐" && (parseTime(item.startTime) ?? 0) >= climbEnd && /早餐|早饭|当地早餐/.test(item.title))) {
     return "爬完不应再叫当地早餐";
+  }
+
+  const namedClimb = buildDraft("明天早上7点去爬泰山", { id: "v-stated-climb", now, random });
+  const named = namedClimb.items.find((item) => item.type === "景点" && item.title.includes("泰山"));
+  if (!named?.locked || named.startTime !== "07:00") return `写了 7 点的泰山应留在 07:00，得到 ${named?.startTime}`;
+  const namedMeal = namedClimb.items.find((item) => item.dayIndex === 1 && /早餐|早饭/.test(item.title));
+  if (namedMeal && (parseTime(namedMeal.startTime) ?? 0) + namedMeal.durationMinutes > 7 * 60) {
+    return `7 点开爬之前放不下早餐就不要排，得到 ${namedMeal.startTime}`;
+  }
+
+  const wuzhenDays = buildDraft("周六从杭州去乌镇", { id: "v2-wz", now, random });
+  const toFive = applySpoken(wuzhenDays, "改成5天", "p_v2_5", random, now);
+  if (typeof toFive === "string") return `乌镇改成 5 天：${toFive}`;
+  if (!toFive.book.assumptions.find((item) => item.key === "return")?.value.includes("这次不补")) return "改成 5 天应写这次不补";
+  const backToTwo = applySpoken(toFive.book, "改成2天", "p_v2_2", random, now);
+  if (typeof backToTwo === "string") return `乌镇再改成 2 天：${backToTwo}`;
+  const restored = backToTwo.book.items.find((item) => item.title === "返回杭州");
+  if (!restored || restored.dayIndex !== 2) return `短途应把返程补回第 2 天，得到第 ${restored?.dayIndex} 天`;
+  const restoredTag = backToTwo.book.assumptions.find((item) => item.key === "return");
+  const restoredClock = restored.startTime;
+  if (restoredTag?.value !== `没写，按第 2 天 ${restoredClock} 估`) {
+    return `补回返程后应刷新这次不补：${restoredTag?.value}，实际 ${restoredClock}`;
+  }
+  if (!restoredTag.inferred) return "补回的返程估计应重新标成推断";
+  const handTag = wuzhenDays.assumptions.find((item) => item.key === "return");
+  if (!handTag) return "乌镇缺少返程假设";
+  const handPlan = planAssumptionEdit(wuzhenDays, handTag.id, "自己安排", random, now);
+  if (!handPlan.request) return handPlan.note || "手改返程假设没有生效";
+  const handed = applyPatch(wuzhenDays, { ...handPlan.request, id: "p_v2_hand" });
+  if (!handed.ok) return handed.error;
+  const handFive = applySpoken(handed.book, "改成5天", "p_v2_hand5", random, now);
+  if (typeof handFive === "string") return `手改后再改 5 天：${handFive}`;
+  const handTwo = applySpoken(handFive.book, "改成2天", "p_v2_hand2", random, now);
+  if (typeof handTwo === "string") return `手改后再改 2 天：${handTwo}`;
+  const keptHand = handTwo.book.assumptions.find((item) => item.key === "return");
+  if (keptHand?.value !== "自己安排" || keptHand.detail !== "已手动修改") {
+    return `手改的返程假设应保留：${keptHand?.value} / ${keptHand?.detail}`;
+  }
+
+  const beijingRest = buildDraft("从上海去北京玩2天", { id: "v3-bj", now, random });
+  const beijingRetimed = applySpoken(beijingRest, "把返程改到14:00", "p_v3_14", random, now);
+  if (typeof beijingRetimed === "string") return `北京改返程：${beijingRetimed}`;
+  const beijingRestBack = beijingRetimed.book.items.find((item) => item.title === "返回上海");
+  if (beijingRestBack?.source.note !== "你改的时间" || beijingRestBack.note?.includes("原话没提返程")) {
+    return `北京返程标签没跟上：${beijingRestBack?.source.note} ${beijingRestBack?.note}`;
+  }
+  const beijingRestTag = beijingRetimed.book.assumptions.find((item) => item.key === "return");
+  if (beijingRestTag?.inferred || beijingRestTag?.value !== `你改到第 ${beijingRestBack?.dayIndex} 天 14:00`) {
+    return `北京返程假设应为你改到第 ${beijingRestBack?.dayIndex} 天 14:00，得到 ${beijingRestTag?.value}`;
+  }
+  const day2 = new Date(`${addDays(beijingRest.startDate, 1)}T02:00:00.000Z`);
+  const tiredLocked = planTired(beijingRetimed.book, day2, random);
+  if (!tiredLocked.request) return tiredLocked.note || "锁定返程后累了没有计划";
+  const tiredLockedBook = applyPatch(beijingRetimed.book, { ...tiredLocked.request, id: "p_v3_tired" });
+  if (!tiredLockedBook.ok) return tiredLockedBook.error;
+  const lockedDepart = beijingRetimed.book.items.find(
+    (item) => item.dayIndex === beijingRestBack?.dayIndex && item.title === "去车站",
+  );
+  const departAt = parseTime(lockedDepart?.startTime ?? beijingRestBack?.startTime ?? "") ?? 14 * 60;
+  const lateRest = tiredLockedBook.book.items.find(
+    (item) => item.dayIndex === beijingRestBack?.dayIndex && item.title === "坐下休息",
+  );
+  if (lateRest) {
+    const restAt = parseTime(lateRest.startTime) ?? 0;
+    if (restAt >= departAt || restAt + lateRest.durationMinutes > departAt) {
+      return `休息不能排在返程出发之后，得到 ${lateRest.startTime}，出发 ${lockedDepart?.startTime ?? beijingRestBack?.startTime}`;
+    }
+  }
+  const tiredOpen = planTired(beijingRest, day2, random);
+  if (!tiredOpen.request) return tiredOpen.note || "未改的傍晚返程累了没有计划";
+  const tiredOpenBook = applyPatch(beijingRest, { ...tiredOpen.request, id: "p_v3_open" });
+  if (!tiredOpenBook.ok) return tiredOpenBook.error;
+  const openStation = beijingRest.items.find((item) => item.dayIndex === 2 && item.title === "去车站");
+  const openRest = tiredOpenBook.book.items.find((item) => item.dayIndex === 2 && item.title === "坐下休息");
+  if (!openRest) return "未锁定的傍晚返程仍应能加上休息";
+  if ((parseTime(openRest.startTime) ?? 0) >= (parseTime(openStation?.startTime ?? "17:00") ?? 0)) {
+    return `傍晚返程的休息不应排到去车站之后，得到 ${openRest.startTime}`;
   }
   return null;
 }

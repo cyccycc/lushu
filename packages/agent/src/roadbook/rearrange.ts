@@ -50,6 +50,30 @@ function isReturnRide(item: RoadbookItem): boolean {
   return item.type === "交通" && item.title.startsWith("返回");
 }
 
+function slotFree(items: RoadbookItem[], day: number, start: number, duration: number): boolean {
+  return !items.some((item) => {
+    if (item.dayIndex !== day) return false;
+    const other = parseTime(item.startTime);
+    if (other == null) return false;
+    return start < other + item.durationMinutes && start + duration > other;
+  });
+}
+
+/** A 40-minute rest that finishes by `depart`, closest to the preferred clock. */
+function findRestSlot(items: RoadbookItem[], day: number, preferred: number, depart: number, floor: number): number | null {
+  const latest = depart - 40;
+  if (latest < floor) return null;
+  const candidates: number[] = [];
+  if (preferred >= floor && preferred <= latest && slotFree(items, day, preferred, 40)) candidates.push(preferred);
+  const start = Math.ceil(floor / 10) * 10;
+  for (let time = start; time <= latest; time += 10) {
+    if (slotFree(items, day, time, 40)) candidates.push(time);
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => Math.abs(a - preferred) - Math.abs(b - preferred) || a - b);
+  return candidates[0] ?? null;
+}
+
 export function planLate(book: Roadbook, now = new Date()): Plan {
   const target = targetDayIndex(book, now);
   const nowMinutes = shanghaiMinutes(now);
@@ -288,11 +312,27 @@ export function planTired(book: Roadbook, now = new Date(), random?: () => strin
   const start = anchor ? parseTime(anchor.startTime) : 15 * 60;
   let restAt = start == null ? 15 * 60 : Math.min(start + 75, 16 * 60);
   if (!target.outOfRange && restAt <= nowMinutes) restAt = nowMinutes + 10;
-  if (stationStart != null && restAt + 40 > stationStart) restAt = stationStart - 40;
-  if (restAt > 23 * 60 || restAt < 8 * 60 || (stationStart != null && restAt + 40 > stationStart)) {
+  const ride = book.items.find((item) => item.dayIndex === target.dayIndex && isReturnRide(item));
+  const rideStart = ride ? parseTime(ride.startTime) : null;
+  const departs = [stationStart, rideStart].filter((value): value is number => value != null);
+  const depart = departs.length > 0 ? Math.min(...departs) : null;
+  if (depart != null && restAt + 40 > depart) restAt = depart - 40;
+  if (restAt > 23 * 60 || restAt < 8 * 60 || (depart != null && restAt + 40 > depart)) {
     if (ops.length === 0) return { request: null, note: `${prefix}今天剩下的时间排不下休息。`.trim() };
     const note = `${prefix}减了步行${cut.length ? `，砍了${cut.join("、")}` : ""}。去车站留在返程前。`.trim();
     return { request: { label: "累了", kind: "tired", ops, statusNote: note }, note };
+  }
+  if (depart != null) {
+    const preview = projectPatch(book, { label: "累了", kind: "tired", ops });
+    if (!preview.ok) return { request: null, note: preview.error };
+    const floor = !target.outOfRange ? Math.max(8 * 60, nowMinutes + 10) : 8 * 60;
+    const slot = findRestSlot(preview.items, target.dayIndex, restAt, depart, floor);
+    if (slot == null) {
+      if (ops.length === 0) return { request: null, note: `${prefix}今天剩下的时间排不下休息。`.trim() };
+      const note = `${prefix}减了步行${cut.length ? `，砍了${cut.join("、")}` : ""}。返程前排不下休息。`.trim();
+      return { request: { label: "累了", kind: "tired", ops, statusNote: note }, note };
+    }
+    restAt = slot;
   }
   const restStart = formatTime(restAt);
   restSerial += 1;
@@ -322,6 +362,16 @@ export function planTired(book: Roadbook, now = new Date(), random?: () => strin
   });
   const projected = projectPatch(book, { label: "累了", kind: "tired", ops });
   if (!projected.ok) return { request: null, note: projected.error };
+  if (depart != null) {
+    const placed = projected.items.find((item) => item.id === restId);
+    const placedStart = placed ? parseTime(placed.startTime) : null;
+    if (placedStart == null || placedStart >= depart) {
+      ops.pop();
+      if (ops.length === 0) return { request: null, note: `${prefix}今天剩下的时间排不下休息。`.trim() };
+      const held = `${prefix}减了步行${cut.length ? `，砍了${cut.join("、")}` : ""}。返程前排不下休息。`.trim();
+      return { request: { label: "累了", kind: "tired", ops, statusNote: held }, note: held };
+    }
+  }
   const note = `${prefix}减了步行${cut.length ? `，砍了${cut.join("、")}` : ""}，加了休息。`.trim();
   return {
     request: { label: "累了", kind: "tired", ops, statusNote: note },

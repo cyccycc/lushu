@@ -675,7 +675,9 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
                   </p>
                   <p className="text-xs text-muted-foreground">
                     {item.source.kind}
-                    {item.source.kind === "检索" && item.source.note ? ` · ${item.source.note}` : ""}
+                    {item.source.note && (item.source.kind === "检索" || item.source.note === "你改的时间")
+                      ? ` · ${item.source.note}`
+                      : ""}
                     {item.source.kind === "检索" && item.source.url ? (
                       <>
                         {" "}

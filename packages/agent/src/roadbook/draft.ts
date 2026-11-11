@@ -220,7 +220,7 @@ function voicedReturnPhrase(brief: string): string | null {
   return match?.[0] ?? null;
 }
 
-function returnEstimateNote(brief: string): string {
+export function returnEstimateNote(brief: string): string {
   const phrase = voicedReturnPhrase(brief);
   if (!phrase) return INFERRED_RETURN_NOTE;
   return `原话说${phrase}，钟点没写。不回去就删掉`;
@@ -535,11 +535,11 @@ function fullDayItems(
     );
     floor = alignTen(6 * 60 + 30 + ride);
   }
-  const breakfastMin = arriving ? 8 * 60 + 10 : 7 * 60;
-  if (floor != null && floor > breakfastMin) {
-    let cursor = floor;
-    if (floor <= 9 * 60 + 30) {
-      const breakfastStart = alignTen(floor);
+  if (floor != null) {
+    const breakfastFloor = Math.max(floor, 7 * 60);
+    let cursor = breakfastFloor;
+    if (breakfastFloor <= 9 * 60 + 30) {
+      const breakfastStart = alignTen(breakfastFloor);
       items.push(
         item(random, {
           dayIndex,
@@ -557,6 +557,8 @@ function fullDayItems(
         }),
       );
       cursor = breakfastStart + 30;
+    } else {
+      cursor = alignTen(floor);
     }
     if (cursor <= 16 * 60) {
       const climbAt = alignTen(cursor);
@@ -1360,6 +1362,20 @@ function applyClockedVisits(spec: DraftSpec, now: Date): void {
     if (GENERIC_VISIT.test(name) || GENERIC_VISIT.test(canonicalVisitName(name))) return false;
     return true;
   });
+}
+
+/** A climb clock the brief named beside the sight. A departure clock does not count. */
+function statedVisitClock(brief: string, title: string): string | null {
+  const clocks = clocksIn(brief).filter((hit) => !hit.arrival);
+  if (clocks.length === 0) return null;
+  const blockers = [...brief.matchAll(/高铁|动车|飞机|航班|出发|返程|返回|回来|体检|开会|会议|面试/g)]
+    .map((match) => match.index ?? -1)
+    .filter((index) => index >= 0);
+  for (const mention of visitMentions(brief)) {
+    if (!sameVisit(mention.name, title)) continue;
+    return nearestClock(clocks, mention.index, brief, blockers)?.time ?? null;
+  }
+  return null;
 }
 
 function applySpokenSchedule(spec: DraftSpec, now: Date): void {
@@ -2226,46 +2242,8 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
         (entry) => entry.dayIndex === day && entry.type === "交通" && entry.title.includes("前往") && !entry.title.startsWith("返回"),
       );
       const depart = outbound ? parseTime(outbound.startTime) : null;
-      const climbAlready = items.some((entry) => entry.dayIndex === day && entry.type === "景点" && isClimbTitle(entry.title));
-      const climbStart = (() => {
-        const climb = items.find((entry) => entry.dayIndex === day && entry.type === "景点" && isClimbTitle(entry.title));
-        return climb ? parseTime(climb.startTime) : null;
-      })();
-      const breakfastFields = (placeLabel: string) => ({
-        dayIndex: day,
-        startTime: "09:00",
-        durationMinutes: 40,
-        title: guide.food[0] ?? "早餐",
-        place: placeLabel,
-        type: "餐" as const,
-        status: "待做" as const,
-        travelEstimateMinutes: 10,
-        locked: false,
-        priority: "想去" as const,
-        indoor: true,
-        source: inferredSource(unknown ? "通用模板，地点是推断" : "本地草稿"),
-      });
-      let ate = false;
-      if (earliest <= BREAKFAST_LATEST && (climbStart == null || earliest < climbStart)) {
-        const cap = climbStart != null ? Math.min(latest, climbStart) : latest;
-        const slot = placeFree(items, day, earliest, cap, 9 * 60, 40);
-        if (slot != null && slot <= BREAKFAST_LATEST && (climbStart == null || slot < climbStart)) {
-          ate = addAt(slot, 40, breakfastFields(mealPlace));
-        }
-      }
-      if (!ate && climbAlready && depart != null && spec.origin && depart - BREAKFAST_EARLIEST >= 40) {
-        const slot = placeFree(items, day, BREAKFAST_EARLIEST, depart, Math.min(8 * 60, depart - 40), 40);
-        if (slot != null && slot <= BREAKFAST_LATEST && slot + 40 <= depart) {
-          items.push(
-            item(random, {
-              ...breakfastFields(spec.origin),
-              startTime: formatTime(slot),
-              durationMinutes: 40,
-            }),
-          );
-          ate = true;
-        }
-      }
+      const climbItem = items.find((entry) => entry.dayIndex === day && entry.type === "景点" && isClimbTitle(entry.title));
+      const statedClimb = climbItem ? statedVisitClock(spec.brief, climbItem.title) : null;
       const mustName = spec.interests[0] ?? spec.landmark;
       const allowRepeat = repeatRequested(spec.brief);
       const deferFull = (place: Place) => earliest > 11 * 60 && isFullDay(place) && day < days;
@@ -2286,12 +2264,84 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
         if (!place || visitPlaced(items, place.name)) return null;
         return place;
       };
+      const upcoming = climbItem ? null : takePlaced(true);
+      const climbMorning = Boolean(climbItem) || Boolean(upcoming && isClimbTitle(upcoming.name));
+      const earlyBreakfastAt = earliest <= BREAKFAST_LATEST ? alignTen(Math.max(earliest, BREAKFAST_EARLIEST)) : null;
+      if (
+        climbItem &&
+        !statedClimb &&
+        !climbItem.locked &&
+        earlyBreakfastAt != null &&
+        earlyBreakfastAt + 70 <= latest
+      ) {
+        const climbAt = earlyBreakfastAt + 40;
+        const room = latest - climbAt;
+        const span = Math.min(climbItem.durationMinutes, room);
+        const blocked = items.some((entry) => {
+          if (entry === climbItem || entry.dayIndex !== day) return false;
+          const other = parseTime(entry.startTime);
+          if (other == null) return false;
+          return climbAt < other + entry.durationMinutes && climbAt + span > other;
+        });
+        if (!blocked && room >= 30 && climbAt >= earliest) {
+          climbItem.startTime = formatTime(climbAt);
+          if (climbItem.durationMinutes > room) climbItem.durationMinutes = room;
+          const rewritten = noteForPlacedClock(climbItem.note, climbItem.startTime);
+          if (rewritten) climbItem.note = rewritten;
+        }
+      }
+      const climbAlready = Boolean(climbItem);
+      const climbStart = climbItem ? parseTime(climbItem.startTime) : null;
+      const breakfastFields = (placeLabel: string) => ({
+        dayIndex: day,
+        startTime: "09:00",
+        durationMinutes: 40,
+        title: guide.food[0] ?? "早餐",
+        place: placeLabel,
+        type: "餐" as const,
+        status: "待做" as const,
+        travelEstimateMinutes: 10,
+        locked: false,
+        priority: "想去" as const,
+        indoor: true,
+        source: inferredSource(unknown ? "通用模板，地点是推断" : "本地草稿"),
+      });
+      const breakfastPreferred = climbMorning && earlyBreakfastAt != null ? earlyBreakfastAt : 9 * 60;
+      let ate = false;
+      if (earliest <= BREAKFAST_LATEST && (climbStart == null || earliest < climbStart)) {
+        const cap = climbStart != null ? Math.min(latest, climbStart) : latest;
+        const slot = placeFree(items, day, Math.max(earliest, BREAKFAST_EARLIEST), cap, breakfastPreferred, 40);
+        if (slot != null && slot <= BREAKFAST_LATEST && (climbStart == null || slot + 40 <= climbStart)) {
+          ate = addAt(slot, 40, breakfastFields(mealPlace));
+        }
+      }
+      if (!ate && climbAlready && depart != null && spec.origin && depart - BREAKFAST_EARLIEST >= 40) {
+        const slot = placeFree(items, day, BREAKFAST_EARLIEST, depart, Math.min(8 * 60, depart - 40), 40);
+        if (slot != null && slot <= BREAKFAST_LATEST && slot + 40 <= depart) {
+          items.push(
+            item(random, {
+              ...breakfastFields(spec.origin),
+              startTime: formatTime(slot),
+              durationMinutes: 40,
+            }),
+          );
+          ate = true;
+        }
+      }
       if (!climbAlready && placedToday < 2 && latest - earliest >= 90) {
-        const first = takePlaced(true);
+        const first = upcoming ?? takePlaced(true);
         if (first) {
           const interest = spec.interests.some((name) => first.name.includes(name) || name.includes(first.name));
           const duration = isFullDay(first) ? Math.min(360, latest - earliest - 30) : 100;
-          if (addAt(Math.max(earliest, 10 * 60), duration, sightFields(first, interest))) {
+          const breakfastPlaced = items.find(
+            (entry) => entry.dayIndex === day && entry.type === "餐" && isBreakfastTitle(entry.title),
+          );
+          const afterBreakfast = breakfastPlaced
+            ? (parseTime(breakfastPlaced.startTime) ?? 0) + breakfastPlaced.durationMinutes
+            : null;
+          const preferred =
+            isClimbTitle(first.name) && afterBreakfast != null ? afterBreakfast : Math.max(earliest, 10 * 60);
+          if (addAt(preferred, duration, sightFields(first, interest))) {
             commitSight(used, first);
             placedToday += 1;
             if (isFullDay(first)) placedToday = 2;

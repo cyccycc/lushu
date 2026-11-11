@@ -6,6 +6,7 @@ import {
   repeatRequested,
   returnAssumptionValue,
   returnEarliestMinute,
+  returnEstimateNote,
   statedReturnClock,
   wantsInferredReturn,
 } from "./draft";
@@ -15,6 +16,17 @@ import { formatTime, inferStartDate, inferWeekdayDate, isUnsetWhen, noteForPlace
 import type { PatchOp, Plan, Roadbook, RoadbookItem } from "./types";
 
 const REGEN_NOTICE = "未锁定的改动已重排。";
+const HAND_EDITED_DETAIL = "已手动修改";
+const SKIPPED_RETURN_VALUE = "这次不补";
+const SKIPPED_RETURN_DETAIL = "超过短途，不再补返程";
+const USER_CLOCK_NOTE = "这个钟点是你改的。";
+const USER_CLOCK_SOURCE = "你改的时间";
+
+function canRefreshReturnChip(item: Roadbook["assumptions"][number]): boolean {
+  if (item.detail === HAND_EDITED_DETAIL) return false;
+  if (item.inferred) return true;
+  return item.value === SKIPPED_RETURN_VALUE && item.detail === SKIPPED_RETURN_DETAIL;
+}
 
 function findItem(book: Roadbook, name: string): RoadbookItem | undefined {
   const query = name.trim().replace(/[。！？\s]+$/g, "");
@@ -523,7 +535,16 @@ function planReturnClock(book: Roadbook, item: RoadbookItem, startTime: string):
     ops.push({ op: "remove", id: entry.id });
   }
   if (item.locked) ops.push({ op: "update", id: item.id, fields: { locked: false } });
-  ops.push({ op: "update", id: item.id, fields: { startTime } });
+  const ride = item.travelEstimateMinutes ?? item.durationMinutes;
+  ops.push({
+    op: "update",
+    id: item.id,
+    fields: {
+      startTime,
+      note: noteForPlacedClock(USER_CLOCK_NOTE, startTime, ride),
+      source: { kind: "推断", note: USER_CLOCK_SOURCE },
+    },
+  });
   ops.push({ op: "update", id: item.id, fields: { locked: true } });
   if (station && startMin >= 60) {
     const stationTime = formatTime(startMin - 60);
@@ -533,11 +554,22 @@ function planReturnClock(book: Roadbook, item: RoadbookItem, startTime: string):
     dropped.length > 0
       ? `「${item.title}」改到 ${startTime}。已拿掉${dropped.join("、")}。`
       : `「${item.title}」改到 ${startTime}。`;
+  const assumptions = book.assumptions.map((entry) =>
+    entry.key === "return"
+      ? {
+          ...entry,
+          value: `你改到第 ${item.dayIndex} 天 ${startTime}`,
+          inferred: false,
+          detail: "这个钟点是你改的",
+        }
+      : entry,
+  );
   return {
     request: {
       label: `${item.title}改到${startTime}`,
       kind: "user",
       ops,
+      assumptions,
       statusNote: note,
     },
     note,
@@ -672,7 +704,7 @@ export function planAssumptionEdit(
   const value = rawValue.trim().slice(0, 80);
   if (!value) return { request: null, note: "假设不能为空。" };
   let assumptions = book.assumptions.map((item) =>
-    item.id === assumptionId ? { ...item, value, inferred: false, detail: "已手动修改" } : { ...item },
+    item.id === assumptionId ? { ...item, value, inferred: false, detail: HAND_EDITED_DETAIL } : { ...item },
   );
   const ops: PatchOp[] = [];
   let title = book.title;
@@ -709,11 +741,13 @@ export function planAssumptionEdit(
       "18:00";
     const stillThere = Boolean(addedReturn) || Boolean(surviving);
     assumptions = assumptions.map((item) => {
-      if (item.key !== "return" || !item.inferred) return item;
+      if (item.key !== "return" || !canRefreshReturnChip(item)) return item;
       if (!stillThere) {
-        return { ...item, value: "这次不补", inferred: false, detail: "超过短途，不再补返程" };
+        return { ...item, value: SKIPPED_RETURN_VALUE, inferred: false, detail: SKIPPED_RETURN_DETAIL };
       }
-      return { ...item, value: returnAssumptionValue(book.brief, days, returnClock) };
+      const nextValue = returnAssumptionValue(book.brief, days, returnClock);
+      if (item.inferred) return { ...item, value: nextValue };
+      return { ...item, value: nextValue, inferred: true, detail: returnEstimateNote(book.brief) };
     });
   }
   let startDate: string | undefined;
