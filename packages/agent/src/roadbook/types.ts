@@ -114,11 +114,19 @@ export type AppliedPatch = {
   dropped?: { id: string; title: string }[];
 };
 
+/** How many undo steps a book keeps. Older steps drop off the front. */
+export const UNDO_STACK_LIMIT = 20;
+
 export type UndoSnapshot = {
   patchId: string;
   items: RoadbookItem[];
   assumptions: Assumption[];
   weather: WeatherSnap[];
+  /**
+   * Checklist rows that existed before the patch (id + text only).
+   * Check marks are not a patch and are not stored here; undo restores which
+   * rows exist and leaves a surviving row's check mark alone.
+   */
   verifyChecklist: VerifyItem[];
   title: string;
   city: string;
@@ -140,7 +148,12 @@ export type Roadbook = {
   weather: WeatherSnap[];
   verifyChecklist: VerifyItem[];
   patchHistory: AppliedPatch[];
-  undo: UndoSnapshot | null;
+  /**
+   * Undo stack, oldest first. Empty means nothing to undo.
+   * Files written before this stack may still hold one snapshot or null;
+   * `readUndoStack` accepts those and the next save writes the array.
+   */
+  undo: UndoSnapshot[];
   question: RoadbookQuestion | null;
   statusLine: string;
   /** Validated model extract, kept for debugging. Raw model text is never stored. */

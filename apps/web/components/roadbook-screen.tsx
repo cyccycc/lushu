@@ -11,6 +11,7 @@ import {
   planLate,
   planMessage,
   snapForTripDay,
+  readUndoStack,
   summarizeChanges,
   undoLast,
   type PatchRequest,
@@ -284,13 +285,15 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
 
   async function undo() {
     const current = bookRef.current;
-    if (!current?.undo) {
+    const stack = readUndoStack(current?.undo);
+    if (!current || stack.length === 0) {
       setNote("没有可撤销的补丁。");
       return;
     }
     const pending = readPending(id);
     const last = pending[pending.length - 1];
-    if (last && last.id === current.undo.patchId) {
+    const top = stack[stack.length - 1];
+    if (last && top && last.id === top.patchId) {
       const reverted = undoLast(current);
       if (!reverted.ok) {
         setNote(reverted.error);

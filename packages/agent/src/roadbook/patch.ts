@@ -13,7 +13,9 @@ import {
   type PatchResult,
   type Roadbook,
   type RoadbookItem,
+  type UndoSnapshot,
   type VerifyItem,
+  UNDO_STACK_LIMIT,
 } from "./types";
 
 const MAX_OPS = 160;
@@ -26,6 +28,47 @@ function cloneItem(item: RoadbookItem): RoadbookItem {
   };
 }
 
+function checklistIdentity(item: VerifyItem): VerifyItem {
+  return { id: item.id, text: item.text };
+}
+
+function isUndoSnapshot(value: unknown): value is UndoSnapshot {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as { patchId?: unknown; items?: unknown };
+  return typeof raw.patchId === "string" && Array.isArray(raw.items);
+}
+
+/** One snapshot, a stack, or the older null. Newest entry is last. */
+export function readUndoStack(undo: unknown): UndoSnapshot[] {
+  if (Array.isArray(undo)) return undo.filter(isUndoSnapshot).slice(-UNDO_STACK_LIMIT);
+  if (isUndoSnapshot(undo)) return [undo];
+  return [];
+}
+
+export function normalizeRoadbookUndo<T extends Roadbook>(book: T): T {
+  const undo = readUndoStack(book.undo);
+  if (Array.isArray(book.undo) && book.undo.length === undo.length) return book;
+  return { ...book, undo };
+}
+
+function cloneSnapshot(snapshot: UndoSnapshot): UndoSnapshot {
+  const assumptions = Array.isArray(snapshot.assumptions) ? snapshot.assumptions : [];
+  const weather = Array.isArray(snapshot.weather) ? snapshot.weather : [];
+  const verifyChecklist = Array.isArray(snapshot.verifyChecklist) ? snapshot.verifyChecklist : [];
+  return {
+    patchId: snapshot.patchId,
+    items: snapshot.items.map(cloneItem),
+    assumptions: assumptions.map((item) => ({ ...item, changed: false })),
+    weather: weather.map((item) => ({ ...item })),
+    verifyChecklist: verifyChecklist.map(checklistIdentity),
+    title: snapshot.title,
+    city: snapshot.city,
+    startDate: snapshot.startDate,
+    question: snapshot.question ? { ...snapshot.question } : null,
+    statusLine: snapshot.statusLine ?? "",
+  };
+}
+
 function cloneBook(book: Roadbook): Roadbook {
   return {
     ...book,
@@ -34,15 +77,7 @@ function cloneBook(book: Roadbook): Roadbook {
     weather: book.weather.map((item) => ({ ...item })),
     verifyChecklist: book.verifyChecklist.map((item) => ({ ...item })),
     patchHistory: book.patchHistory.map((patch) => ({ ...patch, ops: patch.ops.map(cloneOp) })),
-    undo: book.undo
-      ? {
-          ...book.undo,
-          items: book.undo.items.map(cloneItem),
-          assumptions: book.undo.assumptions.map((item) => ({ ...item })),
-          weather: book.undo.weather.map((item) => ({ ...item })),
-          verifyChecklist: book.undo.verifyChecklist.map((item) => ({ ...item })),
-        }
-      : null,
+    undo: readUndoStack(book.undo).map(cloneSnapshot),
     question: book.question ? { ...book.question } : null,
   };
 }
@@ -485,10 +520,71 @@ function endOf(item: RoadbookItem): number | null {
   return start + item.durationMinutes;
 }
 
+/** Fields a locked item is not allowed to change. Status and the lock itself may. */
+function protectedFieldsDiffer(current: RoadbookItem, restored: RoadbookItem): boolean {
+  return (
+    current.dayIndex !== restored.dayIndex ||
+    current.startTime !== restored.startTime ||
+    current.durationMinutes !== restored.durationMinutes ||
+    current.title !== restored.title ||
+    current.place !== restored.place ||
+    current.lat !== restored.lat ||
+    current.lng !== restored.lng ||
+    current.type !== restored.type ||
+    current.travelEstimateMinutes !== restored.travelEstimateMinutes ||
+    current.estimateSource !== restored.estimateSource ||
+    current.priority !== restored.priority ||
+    current.indoor !== restored.indoor ||
+    current.note !== restored.note ||
+    current.source.kind !== restored.source.kind ||
+    current.source.url !== restored.source.url ||
+    current.source.fetchedAt !== restored.source.fetchedAt ||
+    current.source.note !== restored.source.note
+  );
+}
+
+function sameItemContent(current: RoadbookItem, restored: RoadbookItem): boolean {
+  return !protectedFieldsDiffer(current, restored) && current.status === restored.status && current.locked === restored.locked;
+}
+
+function undoLockError(book: Roadbook, restored: RoadbookItem[], patchId: string): string | null {
+  const restoredById = new Map(restored.map((item) => [item.id, item]));
+  const patch = book.patchHistory.find((entry) => entry.id === patchId);
+  const added = new Set((patch?.ops ?? []).flatMap((op) => (op.op === "add" ? [op.item.id] : [])));
+  for (const item of book.items) {
+    if (!item.locked) continue;
+    const prev = restoredById.get(item.id);
+    if (!prev) {
+      if (added.has(item.id)) continue;
+      return `「${item.title}」已锁定，不能改。`;
+    }
+    if (protectedFieldsDiffer(item, prev)) return `「${item.title}」已锁定，不能改。`;
+  }
+  return null;
+}
+
+function markUndoneAssumptions(previous: Assumption[], current: Assumption[]): Assumption[] {
+  const currentValues = new Map(current.map((item) => [item.id, item.value]));
+  return previous.map((item) => ({
+    ...item,
+    changed: currentValues.get(item.id) !== item.value,
+  }));
+}
+
+function restoreChecklist(previous: VerifyItem[], current: VerifyItem[]): VerifyItem[] {
+  const currentById = new Map(current.map((item) => [item.id, item]));
+  return previous.map((item) => {
+    const row = checklistIdentity(item);
+    const live = currentById.get(item.id) as { checkedAt?: unknown } | undefined;
+    if (!live || !Object.prototype.hasOwnProperty.call(live, "checkedAt")) return row;
+    return { ...row, checkedAt: live.checkedAt } as VerifyItem;
+  });
+}
+
 export function applyPatch(book: Roadbook, request: PatchRequest, now = new Date()): PatchResult {
   const patchId = request.id?.trim() || `p_${now.getTime().toString(36)}`;
   if (book.patchHistory.some((patch) => patch.id === patchId)) {
-    return { ok: true, book };
+    return { ok: true, book: normalizeRoadbookUndo(book) };
   }
   let assumptions: Assumption[] | undefined;
   try {
@@ -517,18 +613,21 @@ export function applyPatch(book: Roadbook, request: PatchRequest, now = new Date
     ops: request.ops.map(cloneOp),
     dropped: droppedBy(book, request.ops),
   };
-  const undo = {
-    patchId,
-    items: book.items.map(cloneItem),
-    assumptions: book.assumptions.map((item) => ({ ...item })),
-    weather: book.weather.map((item) => ({ ...item })),
-    verifyChecklist: book.verifyChecklist.map((item) => ({ ...item })),
-    title: book.title,
-    city: book.city,
-    startDate: book.startDate,
-    question: book.question ? { ...book.question } : null,
-    statusLine: book.statusLine,
-  };
+  const undo = [
+    ...readUndoStack(book.undo).map(cloneSnapshot),
+    cloneSnapshot({
+      patchId,
+      items: book.items,
+      assumptions: book.assumptions,
+      weather: book.weather,
+      verifyChecklist: book.verifyChecklist,
+      title: book.title,
+      city: book.city,
+      startDate: book.startDate,
+      question: book.question,
+      statusLine: book.statusLine,
+    }),
+  ].slice(-UNDO_STACK_LIMIT);
   const next: Roadbook = {
     ...cloneBook(book),
     title: request.title?.trim().slice(0, 80) || book.title,
@@ -547,25 +646,31 @@ export function applyPatch(book: Roadbook, request: PatchRequest, now = new Date
 }
 
 export function undoLast(book: Roadbook, now = new Date()): PatchResult {
-  if (!book.undo) return { ok: false, error: "没有可撤销的补丁。", book };
-  const snapshot = book.undo;
+  const stack = readUndoStack(book.undo).map(cloneSnapshot);
+  const snapshot = stack[stack.length - 1];
+  if (!snapshot) return { ok: false, error: "没有可撤销的补丁。", book };
+  const items = snapshot.items.map(cloneItem);
+  const lockError = undoLockError(book, items, snapshot.patchId);
+  if (lockError) return { ok: false, error: lockError, book };
   const next: Roadbook = {
     ...cloneBook(book),
-    items: snapshot.items.map(cloneItem),
-    assumptions: snapshot.assumptions.map((item) => ({ ...item })),
+    items,
+    assumptions: markUndoneAssumptions(snapshot.assumptions, book.assumptions),
     weather: snapshot.weather.map((item) => ({ ...item })),
-    verifyChecklist: snapshot.verifyChecklist.map((item) => ({ ...item })),
+    verifyChecklist: restoreChecklist(snapshot.verifyChecklist, book.verifyChecklist),
     title: snapshot.title,
     city: snapshot.city,
     startDate: snapshot.startDate,
     question: snapshot.question ? { ...snapshot.question } : null,
     statusLine: "已撤销上一次改动。",
     patchHistory: book.patchHistory.filter((patch) => patch.id !== snapshot.patchId),
-    undo: null,
+    undo: stack.slice(0, -1),
     updatedAt: now.toISOString(),
   };
-  for (const item of next.items) item.highlight = false;
-  next.assumptions = next.assumptions.map((item) => ({ ...item, changed: false }));
+  for (const item of next.items) {
+    const previous = book.items.find((current) => current.id === item.id);
+    item.highlight = !previous || !sameItemContent(previous, item);
+  }
   return { ok: true, book: next };
 }
 

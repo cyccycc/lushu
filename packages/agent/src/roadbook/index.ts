@@ -1,7 +1,8 @@
 export { buildDraft, buildDraftFromSpec, citeRetrievedSights, itemsForDay, specForQuestion, specFromExtract, specFromRules } from "./draft";
 export type { DraftFixed, DraftKind, DraftLeg, DraftSpec } from "./draft";
 export { planAnswer, planAssumptionEdit, planMessage, summarizeChanges } from "./message";
-export { applyPatch, endsAfterDay, normalizeItem, opsFromUnknown, projectPatch, replaceWeather, undoLast } from "./patch";
+export { applyPatch, endsAfterDay, normalizeItem, normalizeRoadbookUndo, opsFromUnknown, projectPatch, readUndoStack, replaceWeather, undoLast } from "./patch";
+export { UNDO_STACK_LIMIT } from "./types";
 export { planLate, planRain, planTired } from "./rearrange";
 export {
   addDays,

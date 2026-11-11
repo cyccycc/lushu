@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { Roadbook } from "@lushu/agent/roadbook";
+import { normalizeRoadbookUndo, type Roadbook } from "@lushu/agent/roadbook";
 
 const ID_RE = /^[A-Za-z0-9_-]{8,32}$/;
 const writes = new Map<string, Promise<void>>();
@@ -55,6 +55,7 @@ export async function readRoadbook(id: string): Promise<StoredRoadbook | null> {
     const raw = await readFile(fileFor(id), "utf8");
     const parsed = JSON.parse(raw) as StoredRoadbook;
     if (!parsed?.book || parsed.book.id !== id || typeof parsed.accessKey !== "string") return null;
+    parsed.book = normalizeRoadbookUndo(parsed.book);
     return parsed;
   } catch {
     return null;

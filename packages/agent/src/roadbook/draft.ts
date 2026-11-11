@@ -2680,7 +2680,7 @@ export function buildDraftFromSpec(spec: DraftSpec, options: DraftOptions): Road
         ops: items.map((entry) => ({ op: "add" as const, item: { ...entry, source: { ...entry.source } } })),
       },
     ],
-    undo: null,
+    undo: [],
     question,
     statusLine,
   };

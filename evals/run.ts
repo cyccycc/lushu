@@ -28,6 +28,7 @@ import {
   formatTime,
   normalizeWeatherQuery,
   parseTime,
+  normalizeRoadbookUndo,
   planAssumptionEdit,
   planLate,
   planMessage,
@@ -41,6 +42,7 @@ import {
   summarizeChanges,
   snapForTripDay,
   undoLast,
+  UNDO_STACK_LIMIT,
   type Roadbook,
   type RoadbookItem,
 } from "@lushu/agent/roadbook";
@@ -294,7 +296,7 @@ function assertRoadbook(): string | null {
     if (entry.lat !== null && typeof entry.lat !== "number") return "纬度类型不对";
   }
   if (!book.items.some((item) => item.title === "西湖")) return "草稿应包含西湖";
-  if (book.patchHistory.length < 1 || book.undo) return "草稿应记下生成补丁且还不能撤销";
+  if (book.patchHistory.length < 1 || book.undo.length > 0) return "草稿应记下生成补丁且还不能撤销";
 
   const vague = buildDraft("想出去玩", { id: "book2", now, random });
   if (!vague.question || vague.assumptions.filter((item) => item.inferred).length < 1) {
@@ -345,10 +347,12 @@ function assertRoadbook(): string | null {
 
   const undone = undoLast(overlap.book);
   if (!undone.ok) return undone.error;
-  if (undone.book.items.find((item) => item.id === lake.id)?.startTime !== lake.startTime) {
+  const restoredLake = undone.book.items.find((item) => item.id === lake.id);
+  if (restoredLake?.startTime !== lake.startTime) {
     return "撤销后应回到上一份时间";
   }
-  if (undone.book.undo) return "撤销后不应再叠一层撤销";
+  if (!restoredLake.highlight) return "撤销后刚改应跟着被退回的项";
+  if (undone.book.undo.length > 0) return "撤销后不应再叠一层撤销";
 
   const late = planLate(lockedBook, now);
   if (!late.request) return late.note;
@@ -1323,7 +1327,7 @@ function assertExtractSync(jinan: { brief: string; now: string; extract: TripExt
     startDate: "2026-11-06",
     items: [free, biz],
     patchHistory: [],
-    undo: null,
+    undo: [],
   };
   const late = planLate(host, now);
   if (!late.request) return late.note;
@@ -2998,6 +3002,352 @@ function assertUserFixes(): string | null {
   return null;
 }
 
+function highlightedIds(book: Roadbook): string[] {
+  return book.items.filter((item) => item.highlight).map((item) => item.id).sort();
+}
+
+function assertMultiStepUndo(): string | null {
+  const now = new Date("2026-11-14T02:00:00Z");
+  let n = 0;
+  const random = () => `u${(n += 1)}`;
+  const draft = buildDraft("今天去西湖两天，两个人", { id: "undo-stack", now, random });
+  const editable = draft.items.filter((item) => !item.locked);
+  if (editable.length < 5) return `草稿可改项不足 5 个，得到 ${editable.length}`;
+  const steps = editable.slice(0, 5);
+  const originals = steps.map((item) => item.title);
+  let book = draft;
+  for (let index = 0; index < steps.length; index += 1) {
+    const patched = applyPatch(book, {
+      id: `p_walk_${index}`,
+      label: `改 ${originals[index]}`,
+      kind: "user",
+      ops: [{ op: "update", id: steps[index]!.id, fields: { title: `${originals[index]}改` } }],
+    });
+    if (!patched.ok) return patched.error;
+    book = patched.book;
+    if (book.undo.length !== index + 1) return `第 ${index + 1} 步后栈深应是 ${index + 1}，得到 ${book.undo.length}`;
+  }
+  if (book.undo.length !== 5) return `连续 5 步后应能逐步撤销，栈深 ${book.undo.length}`;
+
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const reverted = undoLast(book);
+    if (!reverted.ok) return reverted.error;
+    const current = reverted.book.items.find((item) => item.id === steps[index]!.id);
+    if (current?.title !== originals[index]) {
+      return `撤销第 ${index + 1} 步后「${originals[index]}」应回到初稿，得到 ${current?.title}`;
+    }
+    const marks = highlightedIds(reverted.book);
+    if (marks.length !== 1 || marks[0] !== steps[index]!.id) {
+      return `撤销第 ${index + 1} 步后刚改应只落在「${originals[index]}」，得到 ${marks.join(",")}`;
+    }
+    for (let earlier = 0; earlier < index; earlier += 1) {
+      const pending = reverted.book.items.find((item) => item.id === steps[earlier]!.id);
+      if (pending?.title !== `${originals[earlier]}改`) return `还没撤到的「${originals[earlier]}」被提前改回去了`;
+    }
+    if (reverted.book.assumptions.some((item) => item.changed)) return "没改假设时，撤销不应留下假设上的刚改";
+    if (reverted.book.undo.length !== index) return `撤销后栈深应是 ${index}，得到 ${reverted.book.undo.length}`;
+    book = reverted.book;
+  }
+  if (book.items.length !== draft.items.length) return "退回初稿时项数不一致";
+  for (const item of draft.items) {
+    const restored = book.items.find((entry) => entry.id === item.id);
+    if (!restored) return `退回初稿时丢了「${item.title}」`;
+    if (restored.title !== item.title || restored.startTime !== item.startTime || restored.locked !== item.locked) {
+      return `退回初稿时「${item.title}」不一致：${restored.title} ${restored.startTime}`;
+    }
+  }
+  if (book.patchHistory.length !== draft.patchHistory.length) return "退回初稿后不应留下后来的补丁";
+
+  const tag = draft.assumptions.find((item) => item.key === "party" || item.key === "budget" || item.key === "pace");
+  if (!tag) return "草稿缺少可改的假设标签";
+  const retag = planAssumptionEdit(draft, tag.id, "刚改过的假设", () => "tag");
+  if (!retag.request) return retag.note;
+  const tagged = applyPatch(draft, { ...retag.request, id: "p_tag_undo" });
+  if (!tagged.ok) return tagged.error;
+  const renamed = applyPatch(tagged.book, {
+    id: "p_after_tag",
+    label: "改一项",
+    kind: "user",
+    ops: [{ op: "update", id: steps[0]!.id, fields: { title: "临时名" } }],
+  });
+  if (!renamed.ok) return renamed.error;
+  const undoRename = undoLast(renamed.book);
+  if (!undoRename.ok) return undoRename.error;
+  if (undoRename.book.assumptions.find((item) => item.id === tag.id)?.changed) {
+    return "撤销行程项时，不该把更早的假设高亮带回来";
+  }
+  if (!undoRename.book.items.find((item) => item.id === steps[0]!.id)?.highlight) return "撤销改名后该项应标成刚改";
+  const undoTag = undoLast(undoRename.book);
+  if (!undoTag.ok) return undoTag.error;
+  const restoredTag = undoTag.book.assumptions.find((item) => item.id === tag.id);
+  if (restoredTag?.value !== tag.value) return "撤销后假设应回到初稿";
+  if (!restoredTag.changed) return "撤销假设后，刚改应落在这个标签上";
+  if (undoTag.book.items.find((item) => item.id === steps[0]!.id)?.highlight) return "假设这一步不应继续高亮上一步的行程项";
+
+  const lake = draft.items.find((item) => item.title === "西湖");
+  const breakfast = draft.items.find((item) => item.type === "餐" && item.dayIndex === 1);
+  if (!lake || !breakfast || lake.locked) return "锁定撤销测试缺少西湖或早餐";
+  const lockedBook: Roadbook = {
+    ...draft,
+    items: draft.items.map((item) => (item.id === lake.id ? { ...item, locked: true } : item)),
+  };
+  const moved = applyPatch(lockedBook, {
+    id: "p_safe",
+    label: "改早餐名",
+    kind: "user",
+    ops: [{ op: "update", id: breakfast.id, fields: { title: "早点" } }],
+  });
+  if (!moved.ok) return moved.error;
+  const undoneMove = undoLast(moved.book);
+  if (!undoneMove.ok) return undoneMove.error;
+  const lockedAfter = undoneMove.book.items.find((item) => item.id === lake.id);
+  if (!lockedAfter?.locked || lockedAfter.title !== lake.title || lockedAfter.highlight) {
+    return "撤销其他改动时，锁定项应原样留下";
+  }
+  if (undoneMove.book.items.find((item) => item.id === breakfast.id)?.title !== breakfast.title) {
+    return "未锁定的早餐应能撤销";
+  }
+  const denied = applyPatch(undoneMove.book, {
+    id: "p_deny_locked",
+    label: "改锁定",
+    kind: "user",
+    ops: [{ op: "update", id: lake.id, fields: { title: "不该改" } }],
+  });
+  if (denied.ok) return "锁定项不应被补丁修改";
+  const done = applyPatch(lockedBook, {
+    id: "p_done_locked",
+    label: "完成西湖",
+    kind: "user",
+    ops: [{ op: "update", id: lake.id, fields: { status: "已完成" } }],
+  });
+  if (!done.ok) return done.error;
+  const undoneDone = undoLast(done.book);
+  if (!undoneDone.ok) return undoneDone.error;
+  const doneLake = undoneDone.book.items.find((item) => item.id === lake.id);
+  if (!doneLake?.locked || doneLake.status !== lake.status || !doneLake.highlight) {
+    return "撤销锁定项的完成状态应退回，并且仍锁定";
+  }
+  const blockedBook: Roadbook = {
+    ...moved.book,
+    items: moved.book.items.map((item) => (item.id === lake.id ? { ...item, title: "锁着的西湖" } : item)),
+    undo: moved.book.undo.map((snapshot) => ({
+      ...snapshot,
+      items: snapshot.items.map((item) =>
+        item.id === lake.id ? { ...item, title: "快照里的西湖", locked: true } : item,
+      ),
+    })),
+  };
+  const blocked = undoLast(blockedBook);
+  if (blocked.ok) return "撤销不应改写仍锁定的项";
+  if (blocked.error !== "「锁着的西湖」已锁定，不能改。") return blocked.error;
+  if (blocked.book.items.find((item) => item.id === lake.id)?.title !== "锁着的西湖") return "拒绝撤销时不应改原路书";
+  const locking = applyPatch(draft, {
+    id: "p_lock_only",
+    label: "锁定西湖",
+    kind: "user",
+    ops: [{ op: "update", id: lake.id, fields: { locked: true } }],
+  });
+  if (!locking.ok) return locking.error;
+  const unlocked = undoLast(locking.book);
+  if (!unlocked.ok) return unlocked.error;
+  const unlockedLake = unlocked.book.items.find((item) => item.id === lake.id);
+  if (unlockedLake?.locked || !unlockedLake?.highlight) return "撤销锁定应解除锁定并标成刚改";
+  const renamedLake = applyPatch(draft, {
+    id: "p_rename_lake",
+    label: "改西湖",
+    kind: "user",
+    ops: [{ op: "update", id: lake.id, fields: { title: "西湖改" } }],
+  });
+  if (!renamedLake.ok) return renamedLake.error;
+  const thenLocked = applyPatch(renamedLake.book, {
+    id: "p_lock_after",
+    label: "再锁定",
+    kind: "user",
+    ops: [{ op: "update", id: lake.id, fields: { locked: true } }],
+  });
+  if (!thenLocked.ok) return thenLocked.error;
+  const skipLock: Roadbook = { ...thenLocked.book, undo: thenLocked.book.undo.slice(0, 1) };
+  const refusedWhileLocked = undoLast(skipLock);
+  if (refusedWhileLocked.ok) return "锁定还在时，撤销不应改它的内容";
+  if (refusedWhileLocked.book.items.find((item) => item.id === lake.id)?.title !== "西湖改") {
+    return "拒绝撤销时锁定项的内容应保持";
+  }
+  const unlockFirst = undoLast(thenLocked.book);
+  if (!unlockFirst.ok) return unlockFirst.error;
+  const renameBack = undoLast(unlockFirst.book);
+  if (!renameBack.ok) return renameBack.error;
+  if (renameBack.book.items.find((item) => item.id === lake.id)?.title !== lake.title) {
+    return "先撤销锁定，再撤销改名，应回到初稿";
+  }
+
+  const removable = steps.find((item) => item.id !== lake.id);
+  if (!removable) return "缺少可删除的项";
+  const removed = applyPatch(draft, {
+    id: "p_remove",
+    label: `删除${removable.title}`,
+    kind: "user",
+    ops: [{ op: "remove", id: removable.id }],
+  });
+  if (!removed.ok) return removed.error;
+  const restoredRemove = undoLast(removed.book);
+  if (!restoredRemove.ok) return restoredRemove.error;
+  const broughtBack = restoredRemove.book.items.find((item) => item.id === removable.id);
+  if (!broughtBack?.highlight || broughtBack.title !== removable.title) return "撤销删除应把该项加回来并标成刚改";
+  const dropLocked = undoLast({
+    ...lockedBook,
+    patchHistory: [
+      ...lockedBook.patchHistory,
+      { id: "p_drop_locked", at: now.toISOString(), label: "删锁定", kind: "user", ops: [] },
+    ],
+    undo: [
+      {
+        patchId: "p_drop_locked",
+        items: lockedBook.items.filter((item) => item.id !== lake.id),
+        assumptions: lockedBook.assumptions,
+        weather: lockedBook.weather,
+        verifyChecklist: lockedBook.verifyChecklist,
+        title: lockedBook.title,
+        city: lockedBook.city,
+        startDate: lockedBook.startDate,
+        question: lockedBook.question,
+        statusLine: lockedBook.statusLine,
+      },
+    ],
+  });
+  if (dropLocked.ok) return "撤销不应删掉仍锁定、且不是这一步新增的项";
+
+  let capped = draft;
+  const noted = steps[0]!;
+  for (let index = 0; index < UNDO_STACK_LIMIT + 5; index += 1) {
+    const patched = applyPatch(capped, {
+      id: `p_cap_${index}`,
+      label: `备注 ${index}`,
+      kind: "user",
+      ops: [{ op: "update", id: noted.id, fields: { note: `v${index}` } }],
+    });
+    if (!patched.ok) return patched.error;
+    capped = patched.book;
+    const expected = Math.min(index + 1, UNDO_STACK_LIMIT);
+    if (capped.undo.length !== expected) return `撤销栈应封顶 ${UNDO_STACK_LIMIT}，第 ${index + 1} 步得到 ${capped.undo.length}`;
+  }
+  if (capped.undo[0]?.patchId !== "p_cap_5" || capped.undo.at(-1)?.patchId !== `p_cap_${UNDO_STACK_LIMIT + 4}`) {
+    return `超过上限时应丢掉最早的步骤，栈底 ${capped.undo[0]?.patchId}`;
+  }
+  for (let index = 0; index < UNDO_STACK_LIMIT; index += 1) {
+    const reverted = undoLast(capped);
+    if (!reverted.ok) return reverted.error;
+    capped = reverted.book;
+  }
+  if (capped.undo.length !== 0) return "撤完保留的步骤后栈应为空";
+  if (capped.items.find((item) => item.id === noted.id)?.note !== "v4") {
+    return `最早的 5 步已被丢掉，备注应停在 v4，得到 ${capped.items.find((item) => item.id === noted.id)?.note}`;
+  }
+  const extra = undoLast(capped);
+  if (extra.ok) return "空栈不应再撤销";
+
+  const legacyUndo = {
+    patchId: "p_legacy",
+    items: draft.items.map((item) => ({ ...item, source: { ...item.source } })),
+    assumptions: draft.assumptions.map((item) => ({ ...item })),
+    weather: draft.weather.map((item) => ({ ...item })),
+    verifyChecklist: draft.verifyChecklist.map((item) => ({ ...item, checkedAt: "should-not-stick" })),
+    title: draft.title,
+    city: draft.city,
+    startDate: draft.startDate,
+    question: draft.question,
+    statusLine: draft.statusLine,
+  };
+  const legacy = {
+    ...draft,
+    items: draft.items.map((item) => (item.id === breakfast.id ? { ...item, title: "改过的早餐" } : item)),
+    patchHistory: [
+      ...draft.patchHistory,
+      {
+        id: "p_legacy",
+        at: now.toISOString(),
+        label: "旧补丁",
+        kind: "user" as const,
+        ops: [{ op: "update" as const, id: breakfast.id, fields: { title: "改过的早餐" } }],
+      },
+    ],
+    undo: legacyUndo,
+  };
+  const loaded = normalizeRoadbookUndo(legacy as unknown as Roadbook);
+  if (!Array.isArray(loaded.undo) || loaded.undo.length !== 1 || loaded.undo[0]?.patchId !== "p_legacy") {
+    return "旧的单份 undo 应读成一层栈";
+  }
+  const undoneLegacy = undoLast(legacy as unknown as Roadbook);
+  if (!undoneLegacy.ok) return undoneLegacy.error;
+  const legacyBreakfast = undoneLegacy.book.items.find((item) => item.id === breakfast.id);
+  if (legacyBreakfast?.title !== breakfast.title || !legacyBreakfast.highlight) {
+    return "旧的单份快照应能撤销那一步，并标成刚改";
+  }
+  if (undoneLegacy.book.undo.length !== 0) return "撤销旧快照后应写成空栈";
+  const stacked = applyPatch(legacy as unknown as Roadbook, {
+    id: "p_after_legacy",
+    label: "再改一步",
+    kind: "user",
+    ops: [{ op: "update", id: breakfast.id, fields: { title: "再改早餐" } }],
+  });
+  if (!stacked.ok) return stacked.error;
+  if (
+    stacked.book.undo.length !== 2 ||
+    stacked.book.undo[0]?.patchId !== "p_legacy" ||
+    stacked.book.undo[1]?.patchId !== "p_after_legacy"
+  ) {
+    return "旧快照上再改一步应堆成两层，并在保存时写成栈";
+  }
+  if (stacked.book.undo.some((snapshot) => snapshot.verifyChecklist.some((item) => "checkedAt" in item))) {
+    return "撤销快照不应记下勾选";
+  }
+
+  const checklistBook: Roadbook = {
+    ...draft,
+    verifyChecklist: [
+      { id: "v_keep", text: "开放时间" },
+      { id: "v_drop", text: "返程票" },
+    ],
+  };
+  const withCheck = applyPatch(
+    {
+      ...checklistBook,
+      verifyChecklist: checklistBook.verifyChecklist.map((item) =>
+        item.id === "v_keep" ? { ...item, checkedAt: "2026-11-14T01:00:00.000Z" } : item,
+      ),
+    } as Roadbook,
+    {
+      id: "p_check",
+      label: "补清单",
+      kind: "user",
+      ops: [{ op: "update", id: breakfast.id, fields: { title: "核对早餐" } }],
+      verifyAdds: ["当天天气"],
+    },
+  );
+  if (!withCheck.ok) return withCheck.error;
+  const snap = withCheck.book.undo.at(-1);
+  if (!snap || snap.verifyChecklist.some((item) => "checkedAt" in item)) return "勾选不应进撤销快照";
+  if (snap.verifyChecklist.map((item) => item.id).join(",") !== "v_keep,v_drop") return "撤销快照应保住清单行的 id";
+  const checkedLater = {
+    ...withCheck.book,
+    verifyChecklist: withCheck.book.verifyChecklist
+      .filter((item) => item.id !== "v_drop")
+      .map((item) => (item.id === "v_keep" ? { ...item, checkedAt: "2026-11-14T03:00:00.000Z" } : item)),
+  } as Roadbook;
+  const undoneCheck = undoLast(checkedLater);
+  if (!undoneCheck.ok) return undoneCheck.error;
+  const kept = undoneCheck.book.verifyChecklist.find((item) => item.id === "v_keep") as { text?: string; checkedAt?: string } | undefined;
+  const dropped = undoneCheck.book.verifyChecklist.find((item) => item.id === "v_drop");
+  if (kept?.text !== "开放时间" || kept.checkedAt !== "2026-11-14T03:00:00.000Z") {
+    return "撤销应保留同一条清单后来的勾选";
+  }
+  if (!dropped || "checkedAt" in dropped) return "撤销应恢复被拿掉的清单行，且不补勾选";
+  if (undoneCheck.book.verifyChecklist.some((item) => item.text === "当天天气")) return "撤销应拿掉这一步新增的清单行";
+  if (undoneCheck.book.items.find((item) => item.id === breakfast.id)?.title !== breakfast.title) {
+    return "清单勾选不应挡住行程撤销";
+  }
+  return null;
+}
+
 async function main(): Promise<void> {
   const parserError = assertParser();
   if (parserError) {
@@ -3020,6 +3370,12 @@ async function main(): Promise<void> {
     console.error(`roadbook  ${roadbookError}`);
     process.exit(1);
   }
+  const undoError = assertMultiStepUndo();
+  if (undoError) {
+    console.error(`undo  ${undoError}`);
+    process.exit(1);
+  }
+  console.log("  ok multi-step undo");
   const phraseError = assertLocalPhrases();
   if (phraseError) {
     console.error(`phrases  ${phraseError}`);
