@@ -21,21 +21,37 @@ import {
 import {
   addDays,
   applyPatch,
+  applyRoadbookStyle,
   buildDraft,
   buildDraftFromSpec,
+  checklistRowRetired,
   citeRetrievedSights,
+  classifyBookKey,
+  cityTemplateNames,
+  describeItemMenu,
+  describeStyles,
+  factMark,
   forecastDaysThrough,
   formatTime,
+  normalizeRoadbook,
   normalizeWeatherQuery,
   parseTime,
   normalizeRoadbookUndo,
   planAssumptionEdit,
+  planItemDelete,
+  planItemMove,
+  planItemSwap,
+  planItemUnlock,
   planLate,
+  planLockMust,
   planMessage,
   planRain,
   planTired,
+  setChecklistChecked,
+  shareView,
   shanghaiDate,
   shanghaiMinutes,
+  STYLE_CONFIRM,
   specForQuestion,
   specFromExtract,
   specFromRules,
@@ -43,6 +59,7 @@ import {
   snapForTripDay,
   undoLast,
   UNDO_STACK_LIMIT,
+  weatherMark,
   type Roadbook,
   type RoadbookItem,
 } from "@lushu/agent/roadbook";
@@ -413,9 +430,9 @@ function assertRoadbook(): string | null {
     return "下雨不应直接换掉未锁定的必去西湖";
   }
   if (!rain.note.includes("西湖是户外，下雨要不要去")) return `下雨应询问必去户外：${rain.note}`;
-  if (!rained.book.verifyChecklist.some((item) => item.text.includes("西湖是户外，下雨要不要去"))) {
-    return "下雨应把必去户外写进核实清单";
-  }
+  const rainRow = rained.book.verifyChecklist.find((item) => item.text.includes("西湖是户外，下雨要不要去"));
+  if (!rainRow) return "下雨应把必去户外写进核实清单";
+  if (rainRow.itemId !== lake.id) return `下雨清单应关联西湖，得到 ${rainRow.itemId ?? "无"}`;
   if (rained.book.items.some((item) => item.dayIndex === 1 && item.title === "灵隐寺")) {
     return "下雨仍应替换未锁定、非必去的户外景点";
   }
@@ -808,6 +825,7 @@ function assertStatedTaishan(book: Roadbook): string | null {
   const blob = `${climb.note ?? ""}${climb.source.note ?? ""}`;
   if (climb.startTime === "07:00") {
     if (!climb.locked) return "07:00 的泰山应锁定";
+    if (climb.source.kind !== "实测") return `07:00 应标实测，得到 ${climb.source.kind}`;
     if (!blob.includes("来自你的原话")) return `07:00 应注明来自你的原话：${blob}`;
     return null;
   }
@@ -876,6 +894,8 @@ function assertJinanBook(book: Roadbook, expectedStart = "2026-11-06"): string |
   if (!checkup || checkup.type !== "办事" || checkup.priority !== "必去") return "体检应为必去的办事";
   if (checkup.locked) return "没写钟点的体检不应锁定";
   if (!`${checkup.note ?? ""} ${checkup.source.note ?? ""}`.includes("时间推断")) return "没写钟点的体检应标时间推断";
+  if (checkup.source.kind !== "推断") return `没写钟点的体检来源仍是推断，得到 ${checkup.source.kind}`;
+  if (factMark(checkup).needsVerify) return "用户说的体检不应显示成需要你核实";
   if (checkup.startTime !== "08:00") return `体检应先放在 08:00，得到 ${checkup.startTime}`;
   if (!checkup.note?.includes(checkup.startTime)) return `体检备注应写实际时间 ${checkup.startTime}：${checkup.note}`;
   const rideBack = book.items.find((item) => item.dayIndex === checkup?.dayIndex && item.locked && item.type === "交通" && item.title.includes("上海"));
@@ -904,6 +924,7 @@ function assertJinanBook(book: Roadbook, expectedStart = "2026-11-06"): string |
   }
   if (!back.locked || back.startTime !== "16:30") return `写了钟点的返程应锁定在 16:30，得到 ${back.startTime} locked=${back.locked}`;
   const statedBlob = `${back.note ?? ""}${back.source.note ?? ""}`;
+  if (back.source.kind !== "实测") return `写了返程钟点应标实测，得到 ${back.source.kind}`;
   if (!statedBlob.includes("来自你的原话")) return `写了返程钟点应标来自你的原话：${statedBlob}`;
   const station = book.items.find((item) => item.title === "去车站");
   if (!station || station.dayIndex !== 2 || station.startTime !== "15:30") {
@@ -1363,6 +1384,9 @@ function assertQaRound2(): string | null {
   if (!movedBook.ok) return movedBook.error;
   const checkupAt = movedBook.book.items.find((item) => item.id === checkup.id);
   if (checkupAt?.startTime !== "07:30") return `体检应改到 07:30，得到 ${checkupAt?.startTime}`;
+  if (checkupAt.source.kind !== "实测" || checkupAt.source.note !== "你改的时间") {
+    return `改过的体检应标实测和你改的时间，得到 ${checkupAt.source.kind} ${checkupAt.source.note}`;
+  }
   if (!checkupAt?.note?.includes("07:30") || checkupAt.note.includes("08:00")) {
     return `体检备注应改成 07:30，得到 ${checkupAt?.note}`;
   }
@@ -1425,9 +1449,10 @@ function assertQaRound2(): string | null {
     now.toISOString(),
   );
   const lakeCited = citedLake.find((item) => item.title === "西湖");
-  if (lakeCited?.source.kind !== "检索" || lakeCited.source.note !== "西湖开放时间与门票") {
-    return `西湖应标检索来源，得到 ${lakeCited?.source.kind} ${lakeCited?.source.note}`;
+  if (lakeCited?.source.kind !== "检索" || lakeCited.source.note !== "西湖开放时间与门票" || !lakeCited.source.url || !lakeCited.source.fetchedAt) {
+    return `西湖应标检索来源和取数时间，得到 ${lakeCited?.source.kind} ${lakeCited?.source.note} ${lakeCited?.source.fetchedAt ?? ""}`;
   }
+  if (factMark(lakeCited, now).unavailable || factMark(lakeCited, now).stale) return "刚检索的西湖不应过时或暂不可用";
   const unrelated = citeRetrievedSights(
     west.items,
     { title: "一篇不相关的文章", url: "https://example.com/other" },
@@ -1470,6 +1495,10 @@ function assertQaRound2(): string | null {
   }
   if (chengdu.startDate !== "2026-11-18") return `成都出差应从 2026-11-18 开始，得到 ${chengdu.startDate}`;
   if (meeting.dayIndex !== 2) return `开会应在 2026-11-19 对应的第 2 天，得到第 ${meeting.dayIndex} 天`;
+  if (meeting.source.kind !== "实测" || !`${meeting.note ?? ""}${meeting.source.note ?? ""}`.includes("来自你的原话")) {
+    return `写了钟点的开会应标实测，得到 ${meeting.source.kind} ${meeting.source.note}`;
+  }
+  if (factMark(meeting).needsVerify) return "用户说的开会不应显示成需要你核实";
   const meetingMove = planMessage(chengdu, "把开会改到15:00", random, now);
   if (!meetingMove.request) return meetingMove.note || "把开会改到15:00没有生效";
   const meetingBook = applyPatch(chengdu, { ...meetingMove.request, id: "p_meeting" });
@@ -2626,7 +2655,9 @@ function assertUserFixes(): string | null {
   if (wuzhenBack?.startTime !== "16:00" || !wuzhenBack.locked) {
     return `乌镇返程应钉在 16:00，得到 ${wuzhenBack?.startTime} locked=${wuzhenBack?.locked}`;
   }
-  if (wuzhenBack.source.note !== "你改的时间") return `改过的返程来源应是你改的时间，得到 ${wuzhenBack.source.note}`;
+  if (wuzhenBack.source.kind !== "实测" || wuzhenBack.source.note !== "你改的时间") {
+    return `改过的返程应标实测和你改的时间，得到 ${wuzhenBack.source.kind} ${wuzhenBack.source.note}`;
+  }
   if (wuzhenBack.note?.includes("原话没提返程")) return `改过的返程不应再写原话没提：${wuzhenBack.note}`;
   if (!wuzhenBack.note?.includes("你改")) return `改过的返程应写明钟点是你改的：${wuzhenBack.note}`;
   const wuzhenReturnTag = wuzhenPlan.book.assumptions.find((item) => item.key === "return");
@@ -3348,6 +3379,523 @@ function assertMultiStepUndo(): string | null {
   return null;
 }
 
+type FixtureOutcome = { failed: boolean; planned: boolean; line: string };
+
+async function runFixture(fixture: Fixture, liveMode: boolean): Promise<FixtureOutcome> {
+  try {
+    if (fixture.expect === "clarify") {
+      const assessment = assessClarification(fixture.brief);
+      if (!assessment.needsClarify || assessment.questions.length > 3) {
+        return { failed: true, planned: false, line: `  x  ${fixture.id}  expected a clarify step` };
+      }
+      if (assessment.questions.some((question) => question.assumedId === "arrive")) {
+        return { failed: true, planned: false, line: `  x  ${fixture.id}  defaulted a clock to arrival` };
+      }
+      return {
+        failed: false,
+        planned: false,
+        line: `  ok ${fixture.id}  clarify ${assessment.questions.map((question) => question.id).join(",")}`,
+      };
+    }
+    const gate = assessClarification(fixture.brief);
+    if (gate.needsClarify) {
+      return {
+        failed: true,
+        planned: false,
+        line: `  x  ${fixture.id}  confirmed brief still needs clarify: ${gate.questions.map((question) => question.id).join(",")}`,
+      };
+    }
+    const result = await runTravelAgent(fixture.brief, {
+      llm: liveMode ? "auto" : "off",
+      tools: liveMode ? "auto" : "stub",
+    });
+    const problem = checkResult(result, fixture.checks) ?? checkWeather(result, liveMode);
+    if (problem) return { failed: true, planned: true, line: `  x  ${fixture.id}  ${problem}` };
+    const days = result.variants[0]?.days.length ?? 0;
+    return {
+      failed: false,
+      planned: true,
+      line: `  ok ${fixture.id}  ${days} days, ${result.variants.length} plans, ${result.usage.toolCalls} tools, ${result.mode}`,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown error";
+    return { failed: true, planned: false, line: `  x  ${fixture.id}  threw: ${message}` };
+  }
+}
+
+/** Live fixtures run a few at a time. Offline stays one-at-a-time so `pnpm eval` does not change. */
+async function mapFixtures<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const workers = Math.max(1, Math.min(limit, items.length));
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await run(items[index]!);
+    }
+  }
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return results;
+}
+
+function assertStyles(): string | null {
+  const now = new Date("2026-11-01T02:00:00.000Z");
+  let n = 0;
+  const random = () => `st${(n += 1)}`;
+  const draft = buildDraft("从上海去北京玩5天", { id: "style-book", now, random });
+  if (draft.style) return "新路书不应自带风格";
+  const described = describeStyles(draft, now);
+  if (described.current || described.showReturn) return "主方案不应显示回到主方案";
+  if (described.choices.some((choice) => !choice.enabled)) {
+    return `出发前这四种风格都应能用规则版：${described.choices.map((choice) => `${choice.label}${choice.enabled ? "" : "灰"}`).join("、")}`;
+  }
+  const relaxed = applyRoadbookStyle(draft, "更轻松", false, now);
+  if (!relaxed.ok) return relaxed.confirm ? relaxed.note : relaxed.error;
+  if (relaxed.book.style !== "更轻松" || !relaxed.book.mainPlanId || (relaxed.book.mainPlans ?? []).length !== 1) {
+    return "第一次换风格应记下主方案，并显示当前风格";
+  }
+  const savedMoney = applyRoadbookStyle(relaxed.book, "更省钱", false, now);
+  if (!savedMoney.ok) return savedMoney.confirm ? savedMoney.note : savedMoney.error;
+  if (savedMoney.book.style !== "更省钱") return `风格应互斥，得到 ${savedMoney.book.style}`;
+  if (savedMoney.book.mainPlanId !== relaxed.book.mainPlanId) return "换成另一种风格应沿用同一份主方案";
+  const moneyBlob = JSON.stringify({ items: savedMoney.book.items, statusLine: savedMoney.book.statusLine });
+  if (/省了\s*\d|省了[^。\n]{0,12}元/.test(moneyBlob)) return `更省钱写出了省下的金额：${moneyBlob}`;
+  const cut = draft.items.find((item) => item.priority === "可砍");
+  if (cut && !savedMoney.book.items.some((item) => item.id === cut.id)) {
+    return "换到更省钱应先回到主方案，可砍项不该被更轻松一起删掉";
+  }
+  const locked = draft.items.find((item) => item.locked) ?? draft.items.find((item) => item.type === "交通");
+  if (!locked) return "应有一项用来锁定";
+  const held = {
+    ...draft,
+    items: draft.items.map((item) => (item.id === locked.id ? { ...item, locked: true } : item)),
+  };
+  const rainy = applyRoadbookStyle(held, "雨天版", false, now);
+  if (!rainy.ok) return rainy.confirm ? rainy.note : rainy.error;
+  const stillLocked = rainy.book.items.find((item) => item.id === locked.id);
+  if (!stillLocked?.locked || stillLocked.title !== locked.title || stillLocked.startTime !== locked.startTime) {
+    return "换风格不应改锁定项";
+  }
+  const walked = applyRoadbookStyle(draft, "少走路", false, now);
+  if (!walked.ok) return walked.confirm ? walked.note : walked.error;
+  const back = applyRoadbookStyle(walked.book, "main", false, now);
+  if (!back.ok) return back.confirm ? back.note : back.error;
+  if (back.book.style || describeStyles(back.book, now).showReturn) return "回到主方案后不应再显示当前风格或回到主方案";
+  const undoneReturn = undoLast(back.book);
+  if (!undoneReturn.ok) return undoneReturn.error;
+  if (undoneReturn.book.style !== "少走路" || !describeStyles(undoneReturn.book, now).showReturn) {
+    return "撤回回到主方案后，风格和按钮应还在";
+  }
+  const beforeStyle = undoLast(undoneReturn.book);
+  if (!beforeStyle.ok) return beforeStyle.error;
+  if (beforeStyle.book.style || beforeStyle.book.mainPlanId || (beforeStyle.book.mainPlans ?? []).length !== 0) {
+    return "撤销掉第一次换风格后，应丢掉主方案并清空风格";
+  }
+  if (describeStyles(beforeStyle.book, now).showReturn) return "撤销到换风格之前不应再显示回到主方案";
+
+  let edited = relaxed.book;
+  const meal = edited.items.find((item) => item.type === "餐" && !item.locked);
+  if (!meal) return "应有一餐可以手改";
+  for (let index = 0; index < 25; index += 1) {
+    const patched = applyPatch(edited, {
+      id: `p_style_edit_${index}`,
+      label: `备注 ${index}`,
+      kind: "user",
+      ops: [{ op: "update", id: meal.id, fields: { note: `手改 ${index}` } }],
+    });
+    if (!patched.ok) return patched.error;
+    edited = patched.book;
+  }
+  if ((edited.mainPlans ?? []).length !== 1 || edited.mainPlanId !== relaxed.book.mainPlanId) {
+    return "连改 25 步后主方案快照仍应挂在当前路书上";
+  }
+  if (!edited.styleDirty) return "手改之后应记得还要确认";
+  const blocked = applyRoadbookStyle(edited, "雨天版", false, now);
+  if (blocked.ok || !blocked.confirm || blocked.note !== STYLE_CONFIRM) return "换风格前应先确认";
+  const blockedHome = applyRoadbookStyle(edited, "main", false, now);
+  if (blockedHome.ok || !blockedHome.confirm || blockedHome.note !== STYLE_CONFIRM) return "回到主方案前也应先确认";
+  const confirmed = applyRoadbookStyle(edited, "main", true, now);
+  if (!confirmed.ok) return confirmed.confirm ? confirmed.note : confirmed.error;
+  if (confirmed.book.style) return "确认后应回到主方案";
+  const mealAfter = confirmed.book.items.find((item) => item.id === meal.id);
+  if (mealAfter?.note?.includes("手改")) return "确认回到主方案应撤掉风格之后的手改";
+
+  const again = applyRoadbookStyle(confirmed.book, "更轻松", false, now);
+  if (!again.ok) return again.confirm ? again.note : again.error;
+  if (again.book.mainPlanId === relaxed.book.mainPlanId) return "回到主方案之后再换风格，应另存一份当时的主方案";
+
+  const shareLeak = shareView({
+    ...confirmed.book,
+    mainPlans: [{ ...((confirmed.book.mainPlans ?? [])[0] ?? { id: "m", items: [], assumptions: [], weather: [], verifyChecklist: [], title: "", city: "", startDate: "", question: null, statusLine: "" }), statusLine: "主方案快照秘密" }],
+    brief: "原话秘密标记-风格",
+  });
+  const shareJson = JSON.stringify(shareLeak);
+  if (shareJson.includes("主方案快照秘密") || shareJson.includes("原话秘密标记-风格") || shareJson.includes("mainPlans") || shareJson.includes("ownerId")) {
+    return "分享仍不应带上主方案快照或原话";
+  }
+  const allLocked = {
+    ...draft,
+    items: draft.items.map((item) => ({ ...item, locked: true, status: "已完成" as const })),
+  };
+  const gray = describeStyles(allLocked, now);
+  if (gray.choices.some((choice) => choice.enabled)) return "没有能改的项时风格应变灰";
+  return null;
+}
+
+function assertShare(): string | null {
+  const now = new Date("2026-11-09T02:00:00.000Z");
+  let n = 0;
+  const random = () => `sh${(n += 1)}`;
+  const book = buildDraft("从上海去北京玩5天", { id: "share-book", now, random });
+  book.brief = "原话秘密标记-酒店体检";
+  book.ownerId = "user-secret";
+  book.assumptions = book.assumptions.map((item, index) => (index === 0 ? { ...item, detail: "假设秘密标记" } : item));
+  const snapshot = {
+    patchId: "p_old",
+    items: book.items.map((item) => ({ ...item, title: "撤销快照秘密" })),
+    assumptions: book.assumptions,
+    weather: book.weather,
+    verifyChecklist: book.verifyChecklist,
+    title: book.title,
+    city: book.city,
+    startDate: book.startDate,
+    question: null,
+    statusLine: "撤销里的原话",
+  };
+  const leaked = {
+    ...book,
+    undo: [snapshot],
+    verifyChecklist: book.verifyChecklist.map((item) => ({ ...item, checkedAt: "2026-11-11T00:00:00.000Z" })),
+    mainSnapshot: { brief: book.brief, assumptions: book.assumptions, undo: [snapshot], ownerId: "user-secret" },
+    accessKey: "owner-access-key",
+    shareKey: "companion-share-key",
+  };
+  const view = shareView(leaked);
+  const json = JSON.stringify(view);
+  for (const secret of [
+    "原话秘密标记-酒店体检",
+    "假设秘密标记",
+    "撤销快照秘密",
+    "撤销里的原话",
+    "user-secret",
+    "owner-access-key",
+    "companion-share-key",
+    "checkedAt",
+    "mainSnapshot",
+    "verifyChecklist",
+    "ownerId",
+  ]) {
+    if (json.includes(secret)) return `分享数据泄漏了 ${secret}`;
+  }
+  if ("brief" in view || "assumptions" in view || "undo" in view || "ownerId" in view) return "分享对象还留着机主字段";
+  if (view.items.length === 0) return "分享应保留行程";
+  if (!view.items.some((item) => item.source.kind === "实测" || item.source.kind === "推断" || item.source.kind === "检索")) {
+    return "分享应保留来源标记";
+  }
+  const access = "owner-access-key";
+  const share = "companion-share-key";
+  if (classifyBookKey(share, access, share) !== "share") return "分享密钥不能当成机主密钥";
+  if (classifyBookKey(access, access, share) !== "owner") return "机主密钥应能写";
+  if (classifyBookKey("", access, share) !== "none") return "没有密钥不能写";
+  if (classifyBookKey("nope", access, share) !== "none") return "乱写的密钥不能写";
+  if (classifyBookKey(share, access, "rotated-share-key") !== "none") return "重置后旧分享密钥应失效";
+  if (classifyBookKey("rotated-share-key", access, "rotated-share-key") !== "share") return "新分享密钥应只能读";
+  return null;
+}
+
+function assertItemMenu(): string | null {
+  const now = new Date("2026-11-09T02:00:00.000Z");
+  let n = 0;
+  const random = () => `m${(n += 1)}`;
+  const book = buildDraft("下周末两个人从上海去苏州，想看园林。", { id: "menu", now, random });
+  const sight = book.items.find((item) => item.type === "景点" && !item.locked);
+  if (!sight) return "苏州草稿应有未锁定景点";
+  const menu = describeItemMenu(book, sight.id, false);
+  if (typeof menu === "string") return menu;
+  if (menu.whyOnly) return "普通景点不应只有为什么";
+  const enabled = (id: string) => menu.actions.find((action) => action.id === id)?.enabled;
+  if (!enabled("swap") || !enabled("move") || !enabled("delete") || !enabled("why") || !enabled("lock")) {
+    return `未锁定景点的菜单应都能点：${menu.actions.map((action) => `${action.label}${action.enabled ? "" : "灰"}`).join("、")}`;
+  }
+  const swapped = planItemSwap(book, sight.id);
+  if (!swapped.request) return swapped.note;
+  const swappedBook = applyPatch(book, { ...swapped.request, id: "p_swap" });
+  if (!swappedBook.ok) return swappedBook.error;
+  const nextSight = swappedBook.book.items.find((item) => item.id === sight.id);
+  if (
+    !nextSight ||
+    nextSight.title === sight.title ||
+    book.items.some((item) => item.title === nextSight.title) ||
+    nextSight.source.kind !== "推断" ||
+    nextSight.source.note !== "同城模板" ||
+    !nextSight.highlight
+  ) {
+    return `换一个应换成还没排过的推断景点并标刚改，得到 ${nextSight?.title} ${nextSight?.source.kind} ${nextSight?.source.note}`;
+  }
+  if (swappedBook.book.undo.length !== book.undo.length + 1) return "换一个应进入撤销栈";
+  const undoneSwap = undoLast(swappedBook.book);
+  if (!undoneSwap.ok || undoneSwap.book.items.find((item) => item.id === sight.id)?.title !== sight.title) {
+    return "撤销应换回原来的景点";
+  }
+
+  const meal = book.items.find((item) => item.type === "餐" && !item.locked);
+  if (!meal) return "应有一餐";
+  const moved = planItemMove(book, meal.id, "13:00");
+  const spoken = planMessage(book, `把${meal.title}改到13:00`, random, now);
+  if (!moved.request || !spoken.request) return moved.note || spoken.note || "挪时间没有生效";
+  if (JSON.stringify(moved.request.ops) !== JSON.stringify(spoken.request.ops)) return "挪时间应走把午饭改到的同一套改动";
+  const movedBook = applyPatch(book, { ...moved.request, id: "p_move_meal" });
+  if (!movedBook.ok) return movedBook.error;
+  const movedMeal = movedBook.book.items.find((item) => item.id === meal.id);
+  if (movedMeal?.source.kind !== "实测" || movedMeal.source.note !== "你改的时间" || !movedMeal.highlight) {
+    return `挪时间应标实测和你改的时间，得到 ${movedMeal?.startTime} ${movedMeal?.source.kind} ${movedMeal?.source.note}`;
+  }
+
+  const back = book.items.find((item) => item.title.startsWith("返回") && !item.locked);
+  const station = book.items.find((item) => item.title === "去车站");
+  if (!back || !station) return "苏州短途应有未锁定的推断返程和去车站";
+  const stationMenu = describeItemMenu(book, station.id, false);
+  if (typeof stationMenu === "string") return stationMenu;
+  if (!stationMenu.whyOnly || stationMenu.actions.length !== 1 || stationMenu.actions[0]?.label !== "为什么安排这个") {
+    return `去车站菜单应只有为什么，得到 ${stationMenu.actions.map((action) => action.label).join("、")}`;
+  }
+  if (planItemMove(book, station.id, "15:00").request) return "去车站不能单独挪时间";
+  if (planItemDelete(book, station.id).request) return "去车站不能单独删";
+  const retimed = planItemMove(book, back.id, "16:00");
+  const spokenReturn = planMessage(book, "把返程改到16:00", random, now);
+  if (!retimed.request || !spokenReturn.request) return retimed.note || spokenReturn.note || "返程挪时间没有生效";
+  if (JSON.stringify(retimed.request.ops) !== JSON.stringify(spokenReturn.request.ops)) return "返程挪时间应等于把返程改到";
+  if (JSON.stringify(retimed.request.assumptions) !== JSON.stringify(spokenReturn.request.assumptions)) {
+    return "返程挪时间应带上同一套返程标签";
+  }
+  const removed = planItemDelete(book, back.id);
+  if (!removed.request) return removed.note;
+  const removedIds = removed.request.ops.flatMap((op) => (op.op === "remove" ? [op.id] : []));
+  if (!removedIds.includes(back.id) || !removedIds.includes(station.id)) return "删掉推断返程应连去车站一起删";
+  const removedBook = applyPatch(book, { ...removed.request, id: "p_drop_back" });
+  if (!removedBook.ok) return removedBook.error;
+  if (removedBook.book.items.some((item) => item.id === back.id || item.id === station.id)) return "返程和去车站应都不在了";
+  const restored = undoLast(removedBook.book);
+  if (!restored.ok) return restored.error;
+  if (!restored.book.items.some((item) => item.id === back.id) || !restored.book.items.some((item) => item.id === station.id)) {
+    return "撤销应把返程和去车站一起加回来";
+  }
+
+  const locked = planLockMust(book, sight.id);
+  if (!locked.request) return locked.note;
+  const lockedBook = applyPatch(book, { ...locked.request, id: "p_lock_must" });
+  if (!lockedBook.ok) return lockedBook.error;
+  const must = lockedBook.book.items.find((item) => item.id === sight.id);
+  if (!must?.locked || must.priority !== "必去" || !must.highlight) return "锁定必去应同时锁定并标必去";
+  const lockedMenu = describeItemMenu(lockedBook.book, sight.id, false);
+  if (typeof lockedMenu === "string") return lockedMenu;
+  if (lockedMenu.actions.some((action) => (action.id === "swap" || action.id === "move" || action.id === "delete") && action.enabled)) {
+    return "锁定后不能换、挪、删";
+  }
+  const late = planLate(lockedBook.book, now);
+  if (late.request) {
+    const lateBook = applyPatch(lockedBook.book, { ...late.request, id: "p_late_lock" });
+    if (!lateBook.ok) return lateBook.error;
+    const still = lateBook.book.items.find((item) => item.id === sight.id);
+    if (!still || still.title !== must.title || still.startTime !== must.startTime || !still.locked) return "重排不应改锁定项";
+  }
+  const opened = planItemUnlock(lockedBook.book, sight.id, false);
+  if (!opened.request) return opened.note || "自己锁上的景点应能直接解锁";
+  const openedBook = applyPatch(lockedBook.book, { ...opened.request, id: "p_unlock" });
+  if (!openedBook.ok) return openedBook.error;
+  const unlockedSight = openedBook.book.items.find((item) => item.id === sight.id);
+  if (unlockedSight?.locked || unlockedSight?.priority !== "必去") return "解锁只取消锁定，必去还在";
+
+  const checkupBook = buildDraft("明天早上7点在济南体检", { id: "menu-check", now, random });
+  const checkup = checkupBook.items.find((item) => item.title.includes("体检") && item.locked);
+  if (!checkup) return "写了钟点的体检应锁定";
+  const ask = planItemUnlock(checkupBook, checkup.id, false);
+  if (ask.request) return "原话里的体检解锁应先确认";
+  if (!ask.note.includes("原话")) return `体检解锁提示不对：${ask.note}`;
+  const yes = planItemUnlock(checkupBook, checkup.id, true);
+  if (!yes.request) return yes.note;
+  const yesBook = applyPatch(checkupBook, { ...yes.request, id: "p_unlock_check" });
+  if (!yesBook.ok) return yesBook.error;
+  const freeCheck = yesBook.book.items.find((item) => item.id === checkup.id);
+  if (freeCheck?.locked || freeCheck?.priority !== checkup.priority) return "确认解锁后优先级应保持";
+
+  const names = cityTemplateNames(book.city);
+  const host = book.items.find((item) => item.type === "景点" && !item.locked) ?? sight;
+  const filled: Roadbook = {
+    ...book,
+    items: [
+      ...book.items.filter((item) => item.id === host.id || !names.includes(item.title)),
+      ...names.filter((name) => name !== host.title).map((name, index) => ({
+        ...host,
+        id: `fill_${index}`,
+        title: name,
+        locked: false,
+      })),
+    ],
+  };
+  const fullMenu = describeItemMenu(filled, host.id, false);
+  if (typeof fullMenu === "string") return fullMenu;
+  const fullSwap = fullMenu.actions.find((action) => action.id === "swap");
+  if (fullSwap?.enabled || fullSwap?.hint !== "需要模型密钥") {
+    return `同城模板都排过时应变灰并提示需要模型密钥，得到 ${fullSwap?.hint ?? "无"}`;
+  }
+  if (planItemSwap(filled, host.id).request) return "没有候选时不应换成功";
+  const withKey = describeItemMenu(filled, host.id, true);
+  if (typeof withKey === "string") return withKey;
+  if (withKey.actions.find((action) => action.id === "swap")?.hint !== "没有可换的景点") {
+    return "有密钥但没有模板时不应再写需要模型密钥";
+  }
+  return null;
+}
+
+function assertCredibility(): string | null {
+  const now = new Date("2026-11-09T02:00:00.000Z");
+  let n = 0;
+  const random = () => `h${(n += 1)}`;
+  const draft = buildDraft("明天早上7点去爬泰山", { id: "honest", now, random });
+  if (draft.ownerId !== "me") return `新建路书应写 ownerId me，得到 ${draft.ownerId ?? "无"}`;
+  const climb = draft.items.find((item) => item.title.includes("泰山"));
+  if (!climb || climb.source.kind !== "实测" || climb.source.note !== "来自你的原话") {
+    return `原话里的泰山应是实测，得到 ${climb?.source.kind} ${climb?.source.note}`;
+  }
+  const template = draft.items.find((item) => item.source.kind === "推断" && item.type === "景点" && item.id !== climb.id);
+  if (template && !factMark(template).needsVerify) return `${template.title} 是模型建议，应提示需要你核实`;
+
+  const aged = new Date(now.getTime() - 31 * 24 * 60 * 60 * 1000).toISOString();
+  const west = buildDraft("今天去西湖两天，两个人", { id: "honest-west", now, random });
+  const lake = west.items.find((item) => item.title === "西湖");
+  if (!lake) return "缺少西湖";
+  const cited = citeRetrievedSights(west.items, { title: "西湖开放时间与门票", url: "https://example.com/xihu" }, aged);
+  const oldLake = cited.find((item) => item.id === lake.id);
+  if (!oldLake) return "检索后的西湖不见了";
+  const oldMark = factMark(oldLake, now);
+  if (oldMark.kind !== "检索" || !oldMark.fetchedOn || oldMark.unavailable || !oldMark.stale) {
+    return `超过 30 天的检索应带来源、日期和可能过时，得到 ${oldMark.kind} ${oldMark.fetchedOn ?? ""} stale=${oldMark.stale}`;
+  }
+  const fresh = citeRetrievedSights(west.items, { title: "西湖开放时间与门票", url: "https://example.com/xihu" }, now.toISOString());
+  const freshLake = fresh.find((item) => item.id === lake.id);
+  if (!freshLake || factMark(freshLake, now).stale) return "刚取到的检索不应标可能过时";
+  const missing = factMark({ ...lake, source: { kind: "检索", note: "西湖开放时间" } }, now);
+  if (!missing.unavailable || missing.fetchedOn || missing.url) return "没有链接或日期的检索应标暂不可用，不要补数字";
+
+  const freshWeather = {
+    city: "泰安",
+    query: "泰安",
+    date: "2026-11-10",
+    condition: "晴",
+    tempMinC: 8,
+    tempMaxC: 16,
+    precipProbability: 10,
+    available: true,
+    note: "",
+    fetchedAt: new Date(now.getTime() - 23 * 60 * 60 * 1000).toISOString(),
+    sourceUrl: "https://example.com/weather",
+  };
+  if (weatherMark(freshWeather, now).stale || weatherMark(freshWeather, now).unavailable) return "23 小时内的预报不应过时";
+  const staleWeather = { ...freshWeather, fetchedAt: new Date(now.getTime() - 25 * 60 * 60 * 1000).toISOString() };
+  if (!weatherMark(staleWeather, now).stale) return "超过 24 小时的预报应标可能过时";
+  const blankWeather = { ...freshWeather, available: false, tempMinC: null, tempMaxC: null, condition: "暂不可用" };
+  const blank = weatherMark(blankWeather, now);
+  if (!blank.unavailable || blank.summary !== "暂不可用" || /\d/.test(blank.summary)) return "缺预报应是暂不可用，不能编温度";
+
+  const legacyItem = {
+    ...climb,
+    source: { kind: "推断" as const, note: "来自你的原话" },
+  };
+  const editedItem = {
+    ...climb,
+    id: "i_edited",
+    title: "改过的午饭",
+    startTime: "13:00",
+    locked: false,
+    source: { kind: "推断" as const, note: "你改的时间" },
+  };
+  const guessedItem = {
+    ...climb,
+    id: "i_guess",
+    title: "午饭",
+    startTime: "12:00",
+    locked: false,
+    source: { kind: "推断" as const, note: "时间推断" },
+  };
+  const legacy = {
+    ...draft,
+    ownerId: undefined,
+    items: [legacyItem, editedItem, guessedItem],
+    undo: {
+      patchId: "p_old",
+      items: [{ ...legacyItem, title: "快照泰山" }],
+      assumptions: draft.assumptions,
+      weather: draft.weather,
+      verifyChecklist: draft.verifyChecklist.map((item) => ({ ...item, checkedAt: "should-not-stick" })),
+      title: draft.title,
+      city: draft.city,
+      startDate: draft.startDate,
+      question: draft.question,
+      statusLine: draft.statusLine,
+    },
+  };
+  const loaded = normalizeRoadbook(legacy as unknown as Roadbook);
+  if (loaded.ownerId !== "me") return `旧路书读出来应补 ownerId me，得到 ${loaded.ownerId ?? "无"}`;
+  if (loaded.id !== draft.id || loaded.title !== draft.title) return "补 ownerId 不应改路书身份";
+  if (loaded.items.find((item) => item.id === climb.id)?.source.kind !== "实测") return "旧的来自你的原话应读成实测";
+  if (loaded.items.find((item) => item.id === "i_edited")?.source.kind !== "实测") return "旧的你改的时间应读成实测";
+  if (loaded.items.find((item) => item.id === "i_guess")?.source.kind !== "推断") return "时间推断不应被改成实测";
+  const oldSnap = loaded.undo[0]?.items.find((item) => item.id === climb.id);
+  if (oldSnap?.source.kind !== "实测" || oldSnap.title !== "快照泰山") return "撤销快照里的原话也应读成实测";
+  if (loaded.undo.some((snapshot) => snapshot.verifyChecklist.some((item) => "checkedAt" in item))) {
+    return "读入时不应把勾选留在撤销快照里";
+  }
+  if (loaded.items.length !== 3) return "读入旧路书不应改条目数量";
+
+  const row = loaded.verifyChecklist[0];
+  if (!row) return "草稿应有核实清单";
+  const undoBefore = loaded.undo.length;
+  const historyBefore = loaded.patchHistory.length;
+  const checked = setChecklistChecked(loaded, row.id, true, now);
+  if (!checked.ok) return checked.error;
+  const marked = checked.book.verifyChecklist.find((item) => item.id === row.id);
+  if (marked?.checkedAt !== now.toISOString()) return "勾选应记下 checkedAt";
+  if (checked.book.undo.length !== undoBefore || checked.book.patchHistory.length !== historyBefore) {
+    return "勾选不应占撤销位，也不应写成补丁";
+  }
+  const cleared = setChecklistChecked(checked.book, row.id, false, now);
+  if (!cleared.ok) return cleared.error;
+  const open = cleared.book.verifyChecklist.find((item) => item.id === row.id);
+  if (!open || "checkedAt" in open) return "取消勾选应去掉 checkedAt";
+
+  const linkedBook: Roadbook = {
+    ...loaded,
+    verifyChecklist: loaded.verifyChecklist.map((item, index) => (index === 0 ? { ...item, itemId: "i_guess" } : item)),
+  };
+  const ticked = setChecklistChecked(linkedBook, row.id, true, new Date("2026-11-14T03:00:00.000Z"));
+  if (!ticked.ok) return ticked.error;
+  const removed = applyPatch(ticked.book, {
+    id: "p_drop_guess",
+    label: "删除午饭",
+    kind: "user",
+    ops: [{ op: "remove", id: "i_guess" }],
+  });
+  if (!removed.ok) return removed.error;
+  const retired = removed.book.verifyChecklist.find((item) => item.id === row.id);
+  if (!retired || !checklistRowRetired(retired, removed.book.items) || retired.checkedAt !== "2026-11-14T03:00:00.000Z") {
+    return "删掉关联项后清单应标相关项已删，并保留勾选";
+  }
+  if (removed.book.undo.at(-1)?.verifyChecklist.some((item) => "checkedAt" in item)) return "删除项的快照不应记下勾选";
+  const broughtBack = undoLast(removed.book);
+  if (!broughtBack.ok) return broughtBack.error;
+  const restored = broughtBack.book.verifyChecklist.find((item) => item.id === row.id);
+  const restoredGuess = broughtBack.book.items.find((item) => item.id === "i_guess");
+  if (!restoredGuess || checklistRowRetired(restored ?? { id: row.id, text: row.text }, broughtBack.book.items)) {
+    return "撤销删除后，关联项还在，不应再标相关项已删";
+  }
+  if (restored?.checkedAt !== "2026-11-14T03:00:00.000Z" || restored.itemId !== "i_guess") {
+    return "撤销删除应留下后来的勾选和同一条关联";
+  }
+  return null;
+}
+
 async function main(): Promise<void> {
   const parserError = assertParser();
   if (parserError) {
@@ -3376,6 +3924,30 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log("  ok multi-step undo");
+  const credibilityError = assertCredibility();
+  if (credibilityError) {
+    console.error(`credibility  ${credibilityError}`);
+    process.exit(1);
+  }
+  console.log("  ok source honesty, checklist, ownerId");
+  const menuError = assertItemMenu();
+  if (menuError) {
+    console.error(`menu  ${menuError}`);
+    process.exit(1);
+  }
+  console.log("  ok item menu, lock, return delete");
+  const shareError = assertShare();
+  if (shareError) {
+    console.error(`share  ${shareError}`);
+    process.exit(1);
+  }
+  console.log("  ok share payload and share-key refusal");
+  const styleError = assertStyles();
+  if (styleError) {
+    console.error(`style  ${styleError}`);
+    process.exit(1);
+  }
+  console.log("  ok style switch, main plan, confirm, share snapshot");
   const phraseError = assertLocalPhrases();
   if (phraseError) {
     console.error(`phrases  ${phraseError}`);
@@ -3441,53 +4013,13 @@ async function main(): Promise<void> {
   }
 
   console.log(live ? "路书 evals  live model" : "路书 evals  offline");
+  const outcomes = await mapFixtures(fixtures, live ? 4 : 1, (fixture) => runFixture(fixture, live));
   let failed = 0;
   let sawPlan = false;
-  for (const fixture of fixtures) {
-    try {
-      if (fixture.expect === "clarify") {
-        const assessment = assessClarification(fixture.brief);
-        if (!assessment.needsClarify || assessment.questions.length > 3) {
-          failed += 1;
-          console.log(`  x  ${fixture.id}  expected a clarify step`);
-          continue;
-        }
-        if (assessment.questions.some((question) => question.assumedId === "arrive")) {
-          failed += 1;
-          console.log(`  x  ${fixture.id}  defaulted a clock to arrival`);
-          continue;
-        }
-        console.log(`  ok ${fixture.id}  clarify ${assessment.questions.map((question) => question.id).join(",")}`);
-        continue;
-      }
-      const gate = assessClarification(fixture.brief);
-      if (gate.needsClarify) {
-        failed += 1;
-        console.log(
-          `  x  ${fixture.id}  confirmed brief still needs clarify: ${gate.questions.map((question) => question.id).join(",")}`,
-        );
-        continue;
-      }
-      const result = await runTravelAgent(fixture.brief, {
-        llm: live ? "auto" : "off",
-        tools: live ? "auto" : "stub",
-      });
-      sawPlan = true;
-      const problem = checkResult(result, fixture.checks) ?? checkWeather(result, live);
-      if (problem) {
-        failed += 1;
-        console.log(`  x  ${fixture.id}  ${problem}`);
-      } else {
-        const days = result.variants[0]?.days.length ?? 0;
-        console.log(
-          `  ok ${fixture.id}  ${days} days, ${result.variants.length} plans, ${result.usage.toolCalls} tools, ${result.mode}`,
-        );
-      }
-    } catch (error) {
-      failed += 1;
-      const message = error instanceof Error ? error.message : "unknown error";
-      console.log(`  x  ${fixture.id}  threw: ${message}`);
-    }
+  for (const outcome of outcomes) {
+    if (outcome.failed) failed += 1;
+    if (outcome.planned) sawPlan = true;
+    console.log(outcome.line);
   }
   if (!failed && sawPlan && !live) {
     const sample = await runTravelAgent("下周末两个人从上海去苏州，预算两千左右，想看园林也想吃本地菜。", {

@@ -3,7 +3,7 @@ import { extractBrief, validateExtract, type TripExtract } from "@lushu/agent/ro
 import { getWeather, webSearch } from "@lushu/tools";
 import { gateOpen, passwordConfigured } from "@/lib/gate";
 import { llmEnvFromRequest } from "@/lib/llm-request";
-import { createAccessKey, createRoadbookId, enqueueRoadbook, listRoadbooks } from "@/lib/roadbook-store";
+import { createAccessKey, createRoadbookId, createShareKey, enqueueRoadbook, listRoadbooks } from "@/lib/roadbook-store";
 
 const MODEL_STATUS = "已从你的原话读出时间和安排";
 const RULES_STATUS = "没填模型密钥，按关键词粗读；填了能读懂时间和已定安排";
@@ -103,6 +103,7 @@ export async function POST(request: Request) {
   }
 
   const accessKey = createAccessKey();
-  await enqueueRoadbook({ accessKey, book });
-  return Response.json({ book, accessKey });
+  const shareKey = createShareKey();
+  await enqueueRoadbook({ accessKey, shareKey, book });
+  return Response.json({ book, accessKey, shareKey });
 }

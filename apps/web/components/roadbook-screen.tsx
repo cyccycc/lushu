@@ -4,21 +4,29 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
   applyPatch,
+  checklistRowRetired,
+  describeStyles,
+  factMark,
   formatTime,
   parseTime,
   planAnswer,
   planAssumptionEdit,
+  planItemUnlock,
   planLate,
   planMessage,
   snapForTripDay,
   readUndoStack,
   summarizeChanges,
   undoLast,
+  weatherMark,
   type PatchRequest,
   type Roadbook,
   type RoadbookItem,
+  type StyleName,
 } from "@lushu/agent/roadbook";
+import { ItemMenuSheet } from "@/components/item-menu-sheet";
 import { KeySettings } from "@/components/key-settings";
+import { RoadbookPoster } from "@/components/roadbook-poster";
 import {
   bookHeaders,
   hasBrowserKey,
@@ -40,17 +48,45 @@ function span(item: RoadbookItem): string {
   return `${item.startTime}–${formatTime(Math.min(start + item.durationMinutes, 23 * 60 + 59))}`;
 }
 
-function weatherText(book: Roadbook): string {
+function FactLine({ item, now }: { item: RoadbookItem; now: Date }) {
+  const mark = factMark(item, now);
+  return (
+    <>
+      <span data-source={mark.kind}>{mark.kind}</span>
+      {mark.note && !item.note?.includes(mark.note) ? ` · ${mark.note}` : ""}
+      {mark.fetchedOn ? ` · ${mark.fetchedOn}` : ""}
+      {mark.url ? (
+        <>
+          {" · "}
+          <a
+            href={mark.url}
+            className="underline"
+            target="_blank"
+            rel="noreferrer"
+            onClick={(event) => event.stopPropagation()}
+          >
+            来源
+          </a>
+        </>
+      ) : null}
+      {mark.unavailable ? " · 暂不可用" : ""}
+      {mark.stale ? " · 可能过时" : ""}
+      {mark.needsVerify ? " · 需要你核实" : ""}
+      {item.note ? ` · ${item.note}` : ""}
+    </>
+  );
+}
+
+function weatherText(book: Roadbook, now: Date): string {
   const days = [...new Set(book.items.map((item) => item.dayIndex))].sort((a, b) => a - b);
-  const lines = days
+  if (days.length === 0) return book.weather[0]?.note || "暂不可用";
+  return days
     .map((day) => {
-      const snap = snapForTripDay(book, day);
-      if (!snap?.available) return null;
-      return `第${day}天 ${snap.date ?? ""} ${snap.condition} ${snap.tempMinC ?? "?"}–${snap.tempMaxC ?? "?"}°C`;
+      const mark = weatherMark(snapForTripDay(book, day), now);
+      if (mark.unavailable) return `第${day}天 暂不可用`;
+      return `第${day}天 ${mark.summary}${mark.stale ? " · 可能过时" : ""}`;
     })
-    .filter((line): line is string => Boolean(line));
-  if (lines.length === 0) return book.weather[0]?.note || "天气还没缓存";
-  return lines.join(" · ");
+    .join(" · ");
 }
 
 function changeSummary(changed: string[], removed: string[], days: string | undefined, dayRewrite: boolean): string {
@@ -97,6 +133,52 @@ function ChangeHint({
   );
 }
 
+function StyleBar({
+  book,
+  now,
+  online,
+  busy,
+  onPick,
+}: {
+  book: Roadbook;
+  now: Date;
+  online: boolean;
+  busy: boolean;
+  onPick: (style: StyleName) => void;
+}) {
+  const described = describeStyles(book, now);
+  return (
+    <div className="space-y-1">
+      <p className="text-xs text-muted-foreground">{described.current ? `当前：${described.current}` : "当前：主方案"}</p>
+      <div className="flex flex-wrap gap-2">
+        {described.choices.map((choice) => (
+          <button
+            key={choice.id}
+            type="button"
+            disabled={!online || busy || !choice.enabled}
+            title={choice.hint}
+            className={`rounded-full border px-3 py-1 text-xs disabled:opacity-50 ${choice.current ? "border-primary bg-primary text-primary-foreground" : "border-border bg-card"}`}
+            onClick={() => onPick(choice.id)}
+          >
+            {choice.label}
+            {!choice.enabled && choice.hint ? <span className="ml-1 text-[10px] opacity-80">{choice.hint}</span> : null}
+          </button>
+        ))}
+        {described.showReturn ? (
+          <button
+            type="button"
+            disabled={!online || busy}
+            className="rounded-full border border-border bg-card px-3 py-1 text-xs disabled:opacity-50"
+            onClick={() => onPick("main")}
+          >
+            回到主方案
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: string }) {
   const [book, setBook] = useState<Roadbook | null>(null);
   const [loading, setLoading] = useState(true);
@@ -107,10 +189,14 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
   const [text, setText] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"share" | "own" | "">("");
+  const [shareKey, setShareKey] = useState("");
   const [hasKey, setHasKey] = useState(false);
   const [composerError, setComposerError] = useState("");
   const [changesOpen, setChangesOpen] = useState(false);
+  const [menuId, setMenuId] = useState<string | null>(null);
+  const [unlockPrompt, setUnlockPrompt] = useState<string | null>(null);
+  const [pendingStyle, setPendingStyle] = useState<StyleName | null>(null);
   const bookRef = useRef<Roadbook | null>(null);
   const editingRef = useRef<string | null>(null);
   const bookPane = useRef<HTMLDivElement>(null);
@@ -188,7 +274,8 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
           else setNote("正在用本机缓存。晚了 1 小时仍可重排。");
           return;
         }
-        const data = (await res.json()) as { book: Roadbook };
+        const data = (await res.json()) as { book: Roadbook; shareKey?: string };
+        if (data.shareKey) setShareKey(data.shareKey);
         const pending = readPending(id);
         if (pending.length === 0) {
           setBook(data.book);
@@ -413,6 +500,62 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
     setNote(data.note || data.book.statusLine);
   }
 
+  async function toggleCheck(rowId: string, checked: boolean) {
+    if (!navigator.onLine || busy) return;
+    const current = bookRef.current;
+    if (!current) return;
+    const row = current.verifyChecklist.find((item) => item.id === rowId);
+    if (!row || checklistRowRetired(row, current.items)) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/roadbooks/${id}/checklist`, {
+        method: "POST",
+        headers: bookHeaders(accessKey),
+        body: JSON.stringify({ id: rowId, checked }),
+      });
+      const data = (await res.json().catch(() => null)) as { book?: Roadbook; error?: string } | null;
+      if (!res.ok || !data?.book) {
+        setNote(data?.error || "核实清单没有记下。");
+        return;
+      }
+      remember(data.book);
+    } catch {
+      setNote("没连上。联网后才能勾。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function switchStyle(style: StyleName, confirmed = false) {
+    if (!navigator.onLine) {
+      setNote("联网后才能换风格。");
+      return;
+    }
+    setBusy(true);
+    const res = await fetch(`/api/roadbooks/${id}/style`, {
+      method: "POST",
+      headers: bookHeaders(accessKey),
+      body: JSON.stringify({ style, confirmed }),
+    }).catch(() => null);
+    setBusy(false);
+    const data = (await res?.json().catch(() => null)) as { book?: Roadbook; note?: string; error?: string; confirm?: boolean } | null;
+    if (!res || !res.ok || !data) {
+      setNote(data?.error || "没有换成。");
+      return;
+    }
+    if (data.confirm) {
+      setPendingStyle(style);
+      return;
+    }
+    if (!data.book) {
+      setNote(data.error || "没有换成。");
+      return;
+    }
+    setPendingStyle(null);
+    remember(data.book);
+    setNote(data.book.statusLine);
+  }
+
   async function saveAssumption(assumptionId: string) {
     if (editingRef.current !== assumptionId) return;
     editingRef.current = null;
@@ -444,6 +587,8 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
     );
   }
 
+  const now = new Date();
+  const menuItem = menuId ? book.items.find((entry) => entry.id === menuId) : undefined;
   const days = [...new Set(book.items.map((item) => item.dayIndex))].sort((a, b) => a - b);
   const highlighted = book.items.filter((item) => item.highlight);
   const dropped = book.patchHistory.at(-1)?.dropped ?? [];
@@ -536,9 +681,16 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
           <p className="text-xs leading-5 text-muted-foreground">{note || book.statusLine}</p>
         )}
         <p className="text-xs leading-5 text-muted-foreground">
-          {book.city} · {weatherText(book)}
+          {book.city} · {weatherText(book, now)}
           {online ? "" : " · 离线缓存"}
         </p>
+        <StyleBar
+          book={book}
+          now={now}
+          online={online}
+          busy={busy}
+          onPick={(style) => void switchStyle(style)}
+        />
         <div className="flex flex-wrap gap-2">
           {book.assumptions.map((item) =>
             editing === item.id ? (
@@ -601,12 +753,12 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
           />
         ) : null}
         {days.map((day) => {
-          const daySnap = snapForTripDay(book, day);
+          const dayWeather = weatherMark(snapForTripDay(book, day), now);
           return (
           <section key={day} className="space-y-2">
             <h2 className="text-sm font-medium">
-              第 {day} 天
-              {daySnap?.available ? ` · ${daySnap.date ?? ""} ${daySnap.condition}` : ""}
+              第 {day} 天 · {dayWeather.heading}
+              {dayWeather.stale ? " · 可能过时" : ""}
             </h2>
             {book.items
               .filter((item) => item.dayIndex === day)
@@ -615,18 +767,30 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
                 <article
                   key={item.id}
                   data-changed={item.highlight ? "1" : undefined}
-                  className={`rounded-2xl border px-3 py-2 ${item.highlight ? "border-amber-400 bg-amber-100/80" : "border-border bg-card"}`}
+                  onClick={() => {
+                    setUnlockPrompt(null);
+                    setMenuId(item.id);
+                  }}
+                  className={`cursor-pointer rounded-2xl border px-3 py-2 ${item.highlight ? "border-amber-400 bg-amber-100/80" : "border-border bg-card"}`}
                 >
                   <div className="flex items-baseline justify-between gap-2">
-                    <p className="text-sm font-medium">
+                    <button
+                      type="button"
+                      className="text-left text-sm font-medium"
+                      onClick={() => {
+                        setUnlockPrompt(null);
+                        setMenuId(item.id);
+                      }}
+                    >
                       {span(item)} {item.title}
                       {item.highlight ? <span className="ml-1 text-xs font-normal text-amber-800">刚改</span> : null}
-                    </p>
+                    </button>
                     <div className="flex shrink-0 gap-2">
                       <button
                         type="button"
                         className="text-xs text-primary"
-                        onClick={() => {
+                        onClick={(event) => {
+                          event.stopPropagation();
                           const done = item.status === "已完成";
                           void commit({
                             label: done ? `${item.title}改回待做` : `完成${item.title}`,
@@ -642,14 +806,16 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
                         <button
                           type="button"
                           className="text-xs text-primary"
-                          onClick={() =>
-                            void commit({
-                              label: `解锁${item.title}`,
-                              kind: "user",
-                              ops: [{ op: "update", id: item.id, fields: { locked: false } }],
-                              statusNote: `已解锁「${item.title}」。之后可以再改时间和内容。`,
-                            })
-                          }
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            const plan = planItemUnlock(book, item.id, false);
+                            if (!plan.request) {
+                              setUnlockPrompt(item.id);
+                              setMenuId(item.id);
+                              return;
+                            }
+                            void commit(plan.request);
+                          }}
                         >
                           解锁
                         </button>
@@ -657,14 +823,15 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
                         <button
                           type="button"
                           className="text-xs text-primary"
-                          onClick={() =>
+                          onClick={(event) => {
+                            event.stopPropagation();
                             void commit({
                               label: `锁定${item.title}`,
                               kind: "user",
                               ops: [{ op: "update", id: item.id, fields: { locked: true } }],
                               statusNote: `已锁定「${item.title}」。重排不会动它。`,
-                            })
-                          }
+                            });
+                          }}
                         >
                           锁定
                         </button>
@@ -677,19 +844,7 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
                     {item.travelEstimateMinutes != null ? ` · 路程约 ${item.travelEstimateMinutes} 分钟（${item.estimateSource || "推断"}）` : ""}
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    {item.source.kind}
-                    {item.source.note && (item.source.kind === "检索" || item.source.note === "你改的时间")
-                      ? ` · ${item.source.note}`
-                      : ""}
-                    {item.source.kind === "检索" && item.source.url ? (
-                      <>
-                        {" "}
-                        <a href={item.source.url} className="underline" target="_blank" rel="noreferrer">
-                          来源
-                        </a>
-                      </>
-                    ) : null}
-                    {item.note ? ` · ${item.note}` : ""}
+                    <FactLine item={item} now={now} />
                   </p>
                 </article>
               ))}
@@ -699,27 +854,87 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
         {book.verifyChecklist.length > 0 ? (
           <section className="pb-2">
             <h2 className="text-sm font-medium">出发前看一眼</h2>
-            <ul className="mt-1 list-disc space-y-1 pl-4 text-xs leading-5 text-muted-foreground">
-              {book.verifyChecklist.map((item) => (
-                <li key={item.id}>{item.text}</li>
-              ))}
+            <ul className="mt-1 space-y-1 text-xs leading-5">
+              {book.verifyChecklist.map((row) => {
+                const retired = checklistRowRetired(row, book.items);
+                const disabled = !online || busy || retired;
+                return (
+                  <li key={row.id} className={retired ? "text-muted-foreground/60" : "text-muted-foreground"}>
+                    <label className={`flex items-start gap-2 ${disabled ? "opacity-50" : ""}`}>
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={Boolean(row.checkedAt)}
+                        disabled={disabled}
+                        onChange={(event) => void toggleCheck(row.id, event.target.checked)}
+                      />
+                      <span>
+                        {row.text}
+                        {retired ? " · 相关项已删" : ""}
+                      </span>
+                    </label>
+                  </li>
+                );
+              })}
             </ul>
           </section>
         ) : null}
+        <RoadbookPoster book={book} />
+        <div className="space-y-2">
+          <button
+            type="button"
+            className="text-xs text-primary"
+            onClick={() => {
+              if (!shareKey) {
+                setNote("分享链接还没准备好。");
+                return;
+              }
+              const link = `${location.origin}/s/${id}/${shareKey}`;
+              navigator.clipboard.writeText(link).then(
+                () => setCopied("share"),
+                () => setNote(link),
+              );
+            }}
+          >
+            {copied === "share" ? "给同行的链接已复制" : "复制给同行"}
+          </button>
+          <button
+            type="button"
+            className="block text-xs text-muted-foreground"
+            onClick={() => {
+              void (async () => {
+                const res = await fetch(`/api/roadbooks/${id}/share`, {
+                  method: "POST",
+                  headers: bookHeaders(accessKey),
+                }).catch(() => null);
+                const data = (await res?.json().catch(() => null)) as { shareKey?: string; error?: string } | null;
+                if (!res || !res.ok || !data?.shareKey) {
+                  setNote(data?.error || "没有重置分享链接。");
+                  return;
+                }
+                setShareKey(data.shareKey);
+                setCopied("");
+                setNote("旧的分享链接已经失效。");
+              })();
+            }}
+          >
+            重置分享链接
+          </button>
+          <button
+            type="button"
+            className="block text-xs text-muted-foreground"
+            onClick={() => {
+              const link = `${location.origin}/b/${id}/${accessKey}`;
+              navigator.clipboard.writeText(link).then(
+                () => setCopied("own"),
+                () => setNote(link),
+              );
+            }}
+          >
+            {copied === "own" ? "自己的链接已复制" : "复制自己的链接（不要发给同行）"}
+          </button>
+        </div>
         <KeySettings />
-        <button
-          type="button"
-          className="text-xs text-primary"
-          onClick={() => {
-            const link = `${location.origin}/b/${id}/${accessKey}`;
-            navigator.clipboard.writeText(link).then(
-              () => setCopied(true),
-              () => setNote(link),
-            );
-          }}
-        >
-          {copied ? "私密链接已复制" : "复制私密链接"}
-        </button>
       </div>
 
       <footer className="shrink-0 space-y-2 border-t border-border bg-background/95 px-3 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
@@ -758,6 +973,40 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
         <div className="lg:hidden">{composer}</div>
       </footer>
       </div>
+      {pendingStyle ? (
+        <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/30" role="presentation">
+          <div role="dialog" aria-label="确认换风格" className="w-full max-w-lg space-y-3 rounded-t-2xl bg-background px-4 py-4">
+            <p className="text-sm leading-6">切换风格之后你改过的内容也会撤掉</p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="min-h-11 flex-1 rounded-xl bg-primary text-sm text-primary-foreground"
+                onClick={() => void switchStyle(pendingStyle, true)}
+              >
+                仍要切换
+              </button>
+              <button type="button" className="min-h-11 flex-1 rounded-xl border border-border text-sm" onClick={() => setPendingStyle(null)}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {menuItem ? (
+        <ItemMenuSheet
+          key={menuItem.id}
+          book={book}
+          item={menuItem}
+          hasModelKey={hasKey}
+          busy={busy}
+          confirmUnlockOnOpen={unlockPrompt === menuItem.id}
+          onClose={() => {
+            setMenuId(null);
+            setUnlockPrompt(null);
+          }}
+          onCommit={(request) => void commit(request)}
+        />
+      ) : null}
     </main>
   );
 }

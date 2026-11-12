@@ -186,20 +186,20 @@ export function planRain(book: Roadbook, now = new Date()): Plan {
   const indoor = guide.places.filter((place) => place.indoor);
   const used = new Set(book.items.map((item) => item.title));
   const ops: PatchOp[] = [];
-  const lockedOutdoor: string[] = [];
-  const asks: string[] = [];
+  const lockedOutdoor: { id: string; title: string }[] = [];
+  const asks: { text: string; itemId: string }[] = [];
   for (const item of book.items) {
     if (item.dayIndex !== target.dayIndex || item.status !== "待做") continue;
     if (isStationRun(item)) continue;
     if (item.type !== "景点" || item.indoor) continue;
     if (item.locked) {
-      lockedOutdoor.push(item.title);
+      lockedOutdoor.push({ id: item.id, title: item.title });
       continue;
     }
     if (item.priority === "必去") {
       const alt = indoor.find((place) => !used.has(place.name));
       if (alt) used.add(alt.name);
-      asks.push(rainAsk(item.title, alt?.name ?? null));
+      asks.push({ text: rainAsk(item.title, alt?.name ?? null), itemId: item.id });
       continue;
     }
     const alt = indoor.find((place) => !used.has(place.name));
@@ -235,17 +235,25 @@ export function planRain(book: Roadbook, now = new Date()): Plan {
     return { request: null, note: `${prefix}今天没有需要改的户外景点。`.trim() };
   }
   const forecast = weatherLine(book, target.dayIndex);
-  const kept = lockedOutdoor.length ? `锁定的户外仍保留：${lockedOutdoor.join("、")}。` : "";
-  const askText = asks.join("");
+  const lockedTitles = lockedOutdoor.map((item) => item.title).join("、");
+  const kept = lockedOutdoor.length ? `锁定的户外仍保留：${lockedTitles}。` : "";
+  const askText = asks.map((item) => item.text).join("");
   const changed = ops.length ? "其他户外景点已改成室内。" : "";
   const note = `${prefix}${forecast}${askText}${kept}${changed}`.trim();
   const verifyAdds = [
-    ...(lockedOutdoor.length ? [`锁定的户外仍保留：${lockedOutdoor.join("、")}。下雨要不要去，自己定。`] : []),
+    ...(lockedOutdoor.length
+      ? [
+          {
+            text: `锁定的户外仍保留：${lockedTitles}。下雨要不要去，自己定。`,
+            ...(lockedOutdoor.length === 1 && lockedOutdoor[0] ? { itemId: lockedOutdoor[0].id } : {}),
+          },
+        ]
+      : []),
     ...asks,
   ];
   return {
     request: {
-      label: asks[0] ?? "下雨了",
+      label: asks[0]?.text ?? "下雨了",
       kind: "rain",
       ops,
       statusNote: note,

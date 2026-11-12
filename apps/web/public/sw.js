@@ -1,4 +1,4 @@
-const CACHE = "lushu-p0-v1";
+const CACHE = "lushu-p1-v3";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -31,7 +31,7 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(cacheFirst(request));
     return;
   }
-  if (request.mode === "navigate" || url.pathname === "/" || url.pathname.startsWith("/b/")) {
+  if (request.mode === "navigate" || url.pathname === "/" || url.pathname.startsWith("/b/") || url.pathname.startsWith("/s/")) {
     event.respondWith(networkFirst(request));
   }
 });

@@ -1,13 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { normalizeRoadbookUndo, type Roadbook } from "@lushu/agent/roadbook";
+import { normalizeRoadbook, type Roadbook } from "@lushu/agent/roadbook";
 
 const ID_RE = /^[A-Za-z0-9_-]{8,32}$/;
 const writes = new Map<string, Promise<void>>();
 
 export type StoredRoadbook = {
   accessKey: string;
+  /** Companion read key. Distinct from accessKey. Missing on books saved before sharing. */
+  shareKey?: string;
   book: Roadbook;
 };
 
@@ -20,6 +22,10 @@ export function createRoadbookId(): string {
 }
 
 export function createAccessKey(): string {
+  return randomBytes(18).toString("base64url");
+}
+
+export function createShareKey(): string {
   return randomBytes(18).toString("base64url");
 }
 
@@ -37,7 +43,8 @@ export async function saveRoadbook(stored: StoredRoadbook): Promise<void> {
   await mkdir(folder, { recursive: true });
   const target = fileFor(stored.book.id);
   const tmp = `${target}.${process.pid}.tmp`;
-  await writeFile(tmp, JSON.stringify(stored));
+  const next: StoredRoadbook = { ...stored, book: normalizeRoadbook(stored.book) };
+  await writeFile(tmp, JSON.stringify(next));
   await rename(tmp, target);
 }
 
@@ -55,7 +62,9 @@ export async function readRoadbook(id: string): Promise<StoredRoadbook | null> {
     const raw = await readFile(fileFor(id), "utf8");
     const parsed = JSON.parse(raw) as StoredRoadbook;
     if (!parsed?.book || parsed.book.id !== id || typeof parsed.accessKey !== "string") return null;
-    parsed.book = normalizeRoadbookUndo(parsed.book);
+    if (typeof parsed.shareKey !== "string" || !parsed.shareKey.trim()) delete parsed.shareKey;
+    else parsed.shareKey = parsed.shareKey.trim();
+    parsed.book = normalizeRoadbook(parsed.book);
     return parsed;
   } catch {
     return null;
@@ -77,4 +86,17 @@ export async function listRoadbooks(): Promise<StoredRoadbook[]> {
   }
   rows.sort((a, b) => (a.book.updatedAt < b.book.updatedAt ? 1 : -1));
   return rows.slice(0, 50);
+}
+
+export async function ensureShareKey(stored: StoredRoadbook): Promise<StoredRoadbook> {
+  if (stored.shareKey) return stored;
+  const next = { ...stored, shareKey: createShareKey() };
+  await enqueueRoadbook(next);
+  return next;
+}
+
+export async function resetShareKey(stored: StoredRoadbook): Promise<StoredRoadbook> {
+  const next = { ...stored, shareKey: createShareKey() };
+  await enqueueRoadbook(next);
+  return next;
 }

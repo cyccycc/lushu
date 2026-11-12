@@ -508,6 +508,69 @@ function resolveWhenStart(value: string, now: Date): string | null {
   return null;
 }
 
+function clockChange(book: Roadbook, item: RoadbookItem, startTime: string): Plan {
+  if (returnLeg(book)?.id === item.id) return planReturnClock(book, item, startTime);
+  const ops: PatchOp[] = [];
+  if (item.locked) ops.push({ op: "update", id: item.id, fields: { locked: false } });
+  ops.push({
+    op: "update",
+    id: item.id,
+    fields: { startTime, source: { kind: "实测", note: USER_CLOCK_SOURCE } },
+  });
+  if (item.locked) ops.push({ op: "update", id: item.id, fields: { locked: true } });
+  return {
+    request: {
+      label: `${item.title}改到${startTime}`,
+      kind: "user",
+      ops,
+      statusNote: `「${item.title}」改到 ${startTime}。`,
+    },
+    note: `「${item.title}」改到 ${startTime}。`,
+  };
+}
+
+/** Menu retime. Locked items and 去车站 are refused; the clock rules match 「把午饭改到 13:00」. */
+export function planMoveItem(book: Roadbook, itemId: string, startTime: string): Plan {
+  const item = book.items.find((entry) => entry.id === itemId);
+  if (!item) return { request: null, note: "没有这一项。" };
+  if (item.title === "去车站") return { request: null, note: "去车站只说明为什么，不能单独改时间。" };
+  if (item.locked) return { request: null, note: `「${item.title}」已锁定，先解锁再改时间。` };
+  if (parseTime(startTime) == null) return { request: null, note: "这个时间无法解析。" };
+  return clockChange(book, item, startTime);
+}
+
+function isInferredReturn(book: Roadbook, item: RoadbookItem): boolean {
+  if (returnLeg(book)?.id !== item.id) return false;
+  return !returnIsExplicit(book, item);
+}
+
+/** Delete one item. An inferred return takes 去车站 with it. */
+export function planDeleteItem(book: Roadbook, itemId: string): Plan {
+  const item = book.items.find((entry) => entry.id === itemId);
+  if (!item) return { request: null, note: "没有这一项。" };
+  if (item.title === "去车站") return { request: null, note: "去车站跟着返程走，不能单独删。" };
+  if (item.locked) return { request: null, note: `「${item.title}」已锁定，不能改。` };
+  const ops: PatchOp[] = [{ op: "remove", id: item.id }];
+  let note = `已去掉「${item.title}」。`;
+  if (isInferredReturn(book, item)) {
+    const station = stationItem(book, item.dayIndex) ?? stationItem(book);
+    if (station && station.id !== item.id) {
+      if (station.locked) return { request: null, note: "去车站已锁定，不能连返程一起删。" };
+      ops.push({ op: "remove", id: station.id });
+      note = `已去掉「${item.title}」和去车站。`;
+    }
+  }
+  return {
+    request: {
+      label: `删除${item.title}`,
+      kind: "user",
+      ops,
+      statusNote: note,
+    },
+    note,
+  };
+}
+
 function planReturnClock(book: Roadbook, item: RoadbookItem, startTime: string): Plan {
   const startMin = parseTime(startTime);
   if (startMin == null) return { request: null, note: "这个时间无法解析。" };
@@ -542,7 +605,7 @@ function planReturnClock(book: Roadbook, item: RoadbookItem, startTime: string):
     fields: {
       startTime,
       note: noteForPlacedClock(USER_CLOCK_NOTE, startTime, ride),
-      source: { kind: "推断", note: USER_CLOCK_SOURCE },
+      source: { kind: "实测", note: USER_CLOCK_SOURCE },
     },
   });
   ops.push({ op: "update", id: item.id, fields: { locked: true } });
@@ -601,16 +664,7 @@ export function planMessage(book: Roadbook, text: string, random?: () => string,
   if (remove?.[1]) {
     const item = findItem(book, remove[1]);
     if (!item) return { request: null, note: "没有找到要删的项。" };
-    if (item.locked) return { request: null, note: `「${item.title}」已锁定，不能改。` };
-    return {
-      request: {
-        label: `删除${item.title}`,
-        kind: "user",
-        ops: [{ op: "remove", id: item.id }],
-        statusNote: `已去掉「${item.title}」。`,
-      },
-      note: `已去掉「${item.title}」。`,
-    };
+    return planDeleteItem(book, item.id);
   }
   const lock = raw.match(/^锁定\s*(.+)$/);
   if (lock?.[1]) {
@@ -650,20 +704,7 @@ export function planMessage(book: Roadbook, text: string, random?: () => string,
     if (!userMayRetimed(book, item)) return { request: null, note: `「${item.title}」已锁定，不能改。` };
     const startTime = parseMoveClock(move[2]);
     if (!startTime) return { request: null, note: "这个时间无法解析。" };
-    if (returnLeg(book)?.id === item.id) return planReturnClock(book, item, startTime);
-    const ops: PatchOp[] = [];
-    if (item.locked) ops.push({ op: "update", id: item.id, fields: { locked: false } });
-    ops.push({ op: "update", id: item.id, fields: { startTime } });
-    if (item.locked) ops.push({ op: "update", id: item.id, fields: { locked: true } });
-    return {
-      request: {
-        label: `${item.title}改到${startTime}`,
-        kind: "user",
-        ops,
-        statusNote: `「${item.title}」改到 ${startTime}。`,
-      },
-      note: `「${item.title}」改到 ${startTime}。`,
-    };
+    return clockChange(book, item, startTime);
   }
   const dayCount = matchTripDays(raw);
   if (dayCount !== undefined) {

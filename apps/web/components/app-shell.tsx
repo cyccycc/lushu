@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 
 export function AppShell({ header, children }: { header: ReactNode; children: ReactNode }) {
   const path = usePathname();
-  const bare = path === "/" || path.startsWith("/b/");
+  const bare = path === "/" || path.startsWith("/b/") || path.startsWith("/s/");
   return (
     <>
       {bare ? null : header}

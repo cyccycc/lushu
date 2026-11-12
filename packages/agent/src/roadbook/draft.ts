@@ -2,7 +2,7 @@ import { guideFor, hasCityGuide, type Place } from "../cities";
 import { citiesInText, cityByName, resolvePlaceToken } from "@lushu/tools/place";
 import { parseBrief, parseZhNumber, statedPartyCount } from "../parse";
 import { addDays, daysBetween, formatTime, inferStartDate, inferWeekdayDate, nextWeekMonday, noteForPlacedClock, parseTime, shanghaiDate, weekdayInWeek } from "./time";
-import type { Assumption, ItemType, Roadbook, RoadbookItem } from "./types";
+import { DEFAULT_OWNER_ID, type Assumption, type ItemType, type Roadbook, type RoadbookItem } from "./types";
 
 type ExtractInput = NonNullable<Roadbook["extract"]>;
 
@@ -1867,7 +1867,7 @@ function dayIndexFor(date: string | null, start: string, days: number): number {
 }
 
 function statedSource(): RoadbookItem["source"] {
-  return { kind: "推断", note: "来自你的原话" };
+  return { kind: "实测", note: "来自你的原话" };
 }
 
 function isClimbTitle(title: string): boolean {
@@ -2683,6 +2683,7 @@ export function buildDraftFromSpec(spec: DraftSpec, options: DraftOptions): Road
     undo: [],
     question,
     statusLine,
+    ownerId: DEFAULT_OWNER_ID,
   };
 }
 

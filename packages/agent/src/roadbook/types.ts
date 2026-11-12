@@ -67,6 +67,13 @@ export type WeatherSnap = {
 export type VerifyItem = {
   id: string;
   text: string;
+  /** Itinerary item this row is about, when there is exactly one. */
+  itemId?: string;
+  /**
+   * When the row was checked. Absent means unchecked.
+   * A check is not a patch and is not stored on the undo stack.
+   */
+  checkedAt?: string;
 };
 
 export type RoadbookQuestion = {
@@ -74,7 +81,26 @@ export type RoadbookQuestion = {
   prompt: string;
 };
 
-export type PatchKind = "draft" | "user" | "late" | "rain" | "tired" | "assumption" | "model";
+export type PatchKind = "draft" | "user" | "late" | "rain" | "tired" | "assumption" | "model" | "style";
+
+export const ROADBOOK_STYLES = ["更轻松", "更省钱", "雨天版", "少走路"] as const;
+export type RoadbookStyle = (typeof ROADBOOK_STYLES)[number];
+
+/** Shown before replacing a style, or the main plan, after a hand edit. */
+export const STYLE_CONFIRM = "切换风格之后你改过的内容也会撤掉";
+
+export type MainPlanSnapshot = {
+  id: string;
+  items: RoadbookItem[];
+  assumptions: Assumption[];
+  weather: WeatherSnap[];
+  verifyChecklist: VerifyItem[];
+  title: string;
+  city: string;
+  startDate: string;
+  question: RoadbookQuestion | null;
+  statusLine: string;
+};
 
 export type ItemFields = Partial<
   Pick<
@@ -117,13 +143,16 @@ export type AppliedPatch = {
 /** How many undo steps a book keeps. Older steps drop off the front. */
 export const UNDO_STACK_LIMIT = 20;
 
+/** Placeholder owner until invite-code spaces exist. Not an access check. */
+export const DEFAULT_OWNER_ID = "me";
+
 export type UndoSnapshot = {
   patchId: string;
   items: RoadbookItem[];
   assumptions: Assumption[];
   weather: WeatherSnap[];
   /**
-   * Checklist rows that existed before the patch (id + text only).
+   * Checklist rows that existed before the patch (id, text, and itemId).
    * Check marks are not a patch and are not stored here; undo restores which
    * rows exist and leaves a surviving row's check mark alone.
    */
@@ -133,6 +162,12 @@ export type UndoSnapshot = {
   startDate: string;
   question: RoadbookQuestion | null;
   statusLine: string;
+  /** Style in effect before this patch. Missing on older frames means none. */
+  style?: RoadbookStyle | null;
+  /** Main-plan snapshot this frame belonged to. Missing means none. */
+  mainPlanId?: string | null;
+  /** Hand edits since the style in this frame. */
+  styleDirty?: boolean;
 };
 
 export type Roadbook = {
@@ -156,6 +191,19 @@ export type Roadbook = {
   undo: UndoSnapshot[];
   question: RoadbookQuestion | null;
   statusLine: string;
+  /**
+   * Reserved for a later per-person space. New books and books read back
+   * without the field use "me". P1 does not filter or authorize with it.
+   */
+  ownerId?: string;
+  /** Active style. Null means the book is showing its main plan. */
+  style?: RoadbookStyle | null;
+  /** Snapshot the active style was built from. Not part of the undo stack. */
+  mainPlanId?: string | null;
+  /** Main plans still referenced by the current book or an undo frame. */
+  mainPlans?: MainPlanSnapshot[];
+  /** True after a hand edit while a style is active. */
+  styleDirty?: boolean;
   /** Validated model extract, kept for debugging. Raw model text is never stored. */
   extract?: {
     kind: "旅游" | "办事" | "混合";
@@ -201,7 +249,7 @@ export type PatchRequest = {
   kind: PatchKind;
   ops: PatchOp[];
   assumptions?: Assumption[];
-  verifyAdds?: string[];
+  verifyAdds?: (string | { text: string; itemId?: string })[];
   setQuestion?: RoadbookQuestion | null;
   title?: string;
   city?: string;

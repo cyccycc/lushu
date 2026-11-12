@@ -1,7 +1,14 @@
-import type { PatchRequest } from "@lushu/agent/roadbook";
-import { canReadBook } from "./gate";
+import { classifyBookKey, type PatchRequest } from "@lushu/agent/roadbook";
+import { bookKeyFrom, gateOpen, keyMatches } from "./gate";
 import { isRoadbookId, readRoadbook, type StoredRoadbook } from "./roadbook-store";
 
+export function shareKeyFrom(request: Request): string {
+  const header = request.headers.get("x-lushu-share-key")?.trim() ?? "";
+  if (header) return header;
+  return bookKeyFrom(request);
+}
+
+/** Owner write. A share key is refused even when it is sent as the book key or with the access-password cookie. */
 export async function authorizedBook(
   request: Request,
   id: string,
@@ -9,13 +16,46 @@ export async function authorizedBook(
   if (!isRoadbookId(id)) return { error: "找不到这本路书。", status: 404 };
   const stored = await readRoadbook(id);
   if (!stored) return { error: "找不到这本路书。", status: 404 };
-  if (!(await canReadBook(request, stored.accessKey))) {
+  const kind = classifyBookKey(bookKeyFrom(request), stored.accessKey, stored.shareKey);
+  if (kind === "share") return { error: "分享链接只能看。", status: 403 };
+  if (kind !== "owner" && !(await gateOpen())) {
     return { error: "需要访问密码或私密链接。", status: 401 };
   }
   return { stored };
 }
 
-const KINDS = new Set(["draft", "user", "late", "rain", "tired", "assumption", "model"]);
+/** Companion read. Only the share key works. The owner access key is not accepted here. */
+export async function sharedBook(
+  request: Request,
+  id: string,
+): Promise<{ stored: StoredRoadbook } | { error: string; status: number }> {
+  if (!isRoadbookId(id)) return { error: "找不到这本路书。", status: 404 };
+  const stored = await readRoadbook(id);
+  if (!stored?.shareKey) return { error: "找不到这本路书。", status: 404 };
+  if (!keyMatches(shareKeyFrom(request), stored.shareKey)) {
+    return { error: "找不到这本路书。", status: 404 };
+  }
+  return { stored };
+}
+
+const KINDS = new Set(["draft", "user", "late", "rain", "tired", "assumption", "model", "style"]);
+
+function readVerifyAdds(value: unknown): PatchRequest["verifyAdds"] {
+  if (!Array.isArray(value)) return undefined;
+  const adds: NonNullable<PatchRequest["verifyAdds"]> = [];
+  for (const item of value) {
+    if (adds.length >= 6) break;
+    if (typeof item === "string") {
+      adds.push(item);
+      continue;
+    }
+    if (!item || typeof item !== "object" || typeof (item as { text?: unknown }).text !== "string") continue;
+    const text = (item as { text: string }).text;
+    const itemId = (item as { itemId?: unknown }).itemId;
+    adds.push(typeof itemId === "string" ? { text, itemId } : { text });
+  }
+  return adds;
+}
 
 export function readPatchBody(body: unknown): PatchRequest | string {
   if (!body || typeof body !== "object") return "补丁无法解析。";
@@ -40,9 +80,7 @@ export function readPatchBody(body: unknown): PatchRequest | string {
     kind: raw.kind,
     ops: raw.ops,
     assumptions: raw.assumptions,
-    verifyAdds: Array.isArray(raw.verifyAdds)
-      ? raw.verifyAdds.filter((item): item is string => typeof item === "string").slice(0, 6)
-      : undefined,
+    verifyAdds: readVerifyAdds(raw.verifyAdds),
     setQuestion,
     title: typeof raw.title === "string" ? raw.title : undefined,
     city: typeof raw.city === "string" ? raw.city : undefined,

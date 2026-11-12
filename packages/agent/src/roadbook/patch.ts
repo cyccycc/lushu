@@ -1,18 +1,23 @@
+import { relabelConfirmedSource } from "./honesty";
 import { DAY_END_MINUTES, formatTime, noteForPlacedClock, parseTime } from "./time";
 import {
+  DEFAULT_OWNER_ID,
   ITEM_STATUSES,
   ITEM_TYPES,
   PRIORITIES,
+  ROADBOOK_STYLES,
   SOURCE_KINDS,
   type AppliedPatch,
   type Assumption,
   type ItemFields,
   type ItemSource,
+  type MainPlanSnapshot,
   type PatchOp,
   type PatchRequest,
   type PatchResult,
   type Roadbook,
   type RoadbookItem,
+  type RoadbookStyle,
   type UndoSnapshot,
   type VerifyItem,
   UNDO_STACK_LIMIT,
@@ -29,7 +34,86 @@ function cloneItem(item: RoadbookItem): RoadbookItem {
 }
 
 function checklistIdentity(item: VerifyItem): VerifyItem {
-  return { id: item.id, text: item.text };
+  const row: VerifyItem = { id: item.id, text: item.text };
+  if (item.itemId) row.itemId = item.itemId;
+  return row;
+}
+
+function relabelItem(item: RoadbookItem): RoadbookItem {
+  const source = relabelConfirmedSource(item.source);
+  if (source === item.source) return item;
+  return { ...item, source };
+}
+
+function relabelOp(op: PatchOp): PatchOp {
+  if (op.op === "add") {
+    const item = relabelItem(op.item);
+    return item === op.item ? op : { op: "add", item };
+  }
+  if (op.op === "update" && op.fields.source) {
+    const source = relabelConfirmedSource(op.fields.source);
+    if (source === op.fields.source) return op;
+    return { ...op, fields: { ...op.fields, source } };
+  }
+  return op;
+}
+
+function liveChecklistRow(item: VerifyItem): VerifyItem {
+  const row: VerifyItem = { id: item.id, text: item.text };
+  if (typeof item.itemId === "string" && item.itemId.trim()) row.itemId = item.itemId.trim().slice(0, 40);
+  if (typeof item.checkedAt === "string" && item.checkedAt.trim()) row.checkedAt = item.checkedAt.trim().slice(0, 40);
+  return row;
+}
+
+function sameChecklistRow(left: VerifyItem, right: VerifyItem): boolean {
+  return left.id === right.id && left.text === right.text && left.itemId === right.itemId && left.checkedAt === right.checkedAt;
+}
+
+function readStyle(value: unknown): RoadbookStyle | null {
+  return typeof value === "string" && (ROADBOOK_STYLES as readonly string[]).includes(value) ? (value as RoadbookStyle) : null;
+}
+
+function isMainPlan(value: unknown): value is MainPlanSnapshot {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as { id?: unknown; items?: unknown };
+  return typeof raw.id === "string" && Array.isArray(raw.items);
+}
+
+function readMainPlans(value: unknown): MainPlanSnapshot[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isMainPlan).map((plan) => ({
+    ...plan,
+    items: plan.items.map(relabelItem),
+    assumptions: Array.isArray(plan.assumptions) ? plan.assumptions.map((item) => ({ ...item })) : [],
+    weather: Array.isArray(plan.weather) ? plan.weather.map((item) => ({ ...item })) : [],
+    verifyChecklist: (Array.isArray(plan.verifyChecklist) ? plan.verifyChecklist : []).map(checklistIdentity),
+    question: plan.question ? { ...plan.question } : null,
+    statusLine: plan.statusLine ?? "",
+  }));
+}
+
+/** Drop main plans that neither the current book nor an undo frame still names. */
+export function retainMainPlans<T extends Roadbook>(book: T): T {
+  const plans = book.mainPlans ?? [];
+  const referenced = new Set<string>();
+  if (book.mainPlanId) referenced.add(book.mainPlanId);
+  for (const frame of book.undo ?? []) {
+    if (frame.mainPlanId) referenced.add(frame.mainPlanId);
+  }
+  const mainPlans = plans.filter((plan) => referenced.has(plan.id));
+  const dangling = Boolean(book.mainPlanId) && !mainPlans.some((plan) => plan.id === book.mainPlanId);
+  const same =
+    !dangling &&
+    mainPlans.length === plans.length &&
+    mainPlans.every((plan, index) => plan === plans[index]);
+  if (same) return book;
+  return {
+    ...book,
+    mainPlans,
+    mainPlanId: dangling ? null : book.mainPlanId ?? null,
+    style: dangling ? null : book.style ?? null,
+    styleDirty: dangling ? false : book.styleDirty === true,
+  };
 }
 
 function isUndoSnapshot(value: unknown): value is UndoSnapshot {
@@ -45,10 +129,65 @@ export function readUndoStack(undo: unknown): UndoSnapshot[] {
   return [];
 }
 
+function snapshotChanged(snapshot: UndoSnapshot, items: RoadbookItem[], verifyChecklist: VerifyItem[]): boolean {
+  if (items.length !== snapshot.items.length || items.some((item, index) => item !== snapshot.items[index])) return true;
+  const previous = Array.isArray(snapshot.verifyChecklist) ? snapshot.verifyChecklist : [];
+  if (verifyChecklist.length !== previous.length) return true;
+  return verifyChecklist.some((row, index) => {
+    const prev = previous[index];
+    if (!prev || !sameChecklistRow(checklistIdentity(prev), row)) return true;
+    return Object.prototype.hasOwnProperty.call(prev, "checkedAt");
+  });
+}
+
+/**
+ * Fill ownerId, map old 「来自你的原话 / 你改的时间」+ 推断 labels onto 实测,
+ * and accept a legacy single undo snapshot. Check marks stay on the live list.
+ * The next save writes this shape; there is no separate migration script.
+ */
+export function normalizeRoadbook<T extends Roadbook>(book: T): T {
+  const ownerId = typeof book.ownerId === "string" && book.ownerId.trim() ? book.ownerId.trim() : DEFAULT_OWNER_ID;
+  const items = book.items.map(relabelItem);
+  const undo = readUndoStack(book.undo).map((snapshot) => {
+    const nextItems = snapshot.items.map(relabelItem);
+    const verifyChecklist = (Array.isArray(snapshot.verifyChecklist) ? snapshot.verifyChecklist : []).map(checklistIdentity);
+    const style = readStyle(snapshot.style);
+    const mainPlanId = typeof snapshot.mainPlanId === "string" ? snapshot.mainPlanId : null;
+    const styleDirty = snapshot.styleDirty === true;
+    const styleSame = snapshot.style === style && (snapshot.mainPlanId ?? null) === mainPlanId && snapshot.styleDirty === styleDirty;
+    if (!snapshotChanged(snapshot, nextItems, verifyChecklist) && styleSame) return snapshot;
+    return { ...snapshot, items: nextItems, verifyChecklist, style, mainPlanId, styleDirty };
+  });
+  const patchHistory = book.patchHistory.map((patch) => {
+    const ops = patch.ops.map(relabelOp);
+    if (ops.every((op, index) => op === patch.ops[index])) return patch;
+    return { ...patch, ops };
+  });
+  const verifyChecklist = (Array.isArray(book.verifyChecklist) ? book.verifyChecklist : []).map(liveChecklistRow);
+  const itemsSame = items.every((item, index) => item === book.items[index]);
+  const undoSame = Array.isArray(book.undo) && book.undo.length === undo.length && undo.every((snapshot, index) => snapshot === book.undo[index]);
+  const historySame = patchHistory.every((patch, index) => patch === book.patchHistory[index]);
+  const checksSame =
+    Array.isArray(book.verifyChecklist) &&
+    verifyChecklist.length === book.verifyChecklist.length &&
+    verifyChecklist.every((row, index) => sameChecklistRow(row, book.verifyChecklist[index]!));
+  const style = readStyle(book.style);
+  const mainPlanId = typeof book.mainPlanId === "string" ? book.mainPlanId : null;
+  const styleDirty = book.styleDirty === true;
+  const mainPlans = readMainPlans(book.mainPlans);
+  const styleSame = book.style === style && (book.mainPlanId ?? null) === mainPlanId && book.styleDirty === styleDirty;
+  const plansSame =
+    Array.isArray(book.mainPlans) &&
+    book.mainPlans.length === mainPlans.length &&
+    mainPlans.every((plan, index) => plan === book.mainPlans?.[index]);
+  if (book.ownerId === ownerId && itemsSame && undoSame && historySame && checksSame && styleSame && plansSame) {
+    return retainMainPlans(book);
+  }
+  return retainMainPlans({ ...book, ownerId, items, undo, patchHistory, verifyChecklist, style, mainPlanId, styleDirty, mainPlans });
+}
+
 export function normalizeRoadbookUndo<T extends Roadbook>(book: T): T {
-  const undo = readUndoStack(book.undo);
-  if (Array.isArray(book.undo) && book.undo.length === undo.length) return book;
-  return { ...book, undo };
+  return normalizeRoadbook(book);
 }
 
 function cloneSnapshot(snapshot: UndoSnapshot): UndoSnapshot {
@@ -66,6 +205,9 @@ function cloneSnapshot(snapshot: UndoSnapshot): UndoSnapshot {
     startDate: snapshot.startDate,
     question: snapshot.question ? { ...snapshot.question } : null,
     statusLine: snapshot.statusLine ?? "",
+    style: readStyle(snapshot.style),
+    mainPlanId: typeof snapshot.mainPlanId === "string" ? snapshot.mainPlanId : null,
+    styleDirty: snapshot.styleDirty === true,
   };
 }
 
@@ -575,34 +717,70 @@ function restoreChecklist(previous: VerifyItem[], current: VerifyItem[]): Verify
   const currentById = new Map(current.map((item) => [item.id, item]));
   return previous.map((item) => {
     const row = checklistIdentity(item);
-    const live = currentById.get(item.id) as { checkedAt?: unknown } | undefined;
+    const live = currentById.get(item.id);
     if (!live || !Object.prototype.hasOwnProperty.call(live, "checkedAt")) return row;
-    return { ...row, checkedAt: live.checkedAt } as VerifyItem;
+    return { ...row, checkedAt: live.checkedAt };
   });
 }
 
+function readVerifyAdd(value: string | { text: string; itemId?: string }): { text: string; itemId?: string } | null {
+  if (typeof value === "string") {
+    const text = value.trim().slice(0, 200);
+    return text ? { text } : null;
+  }
+  if (!value || typeof value.text !== "string") return null;
+  const text = value.text.trim().slice(0, 200);
+  if (!text) return null;
+  const itemId = typeof value.itemId === "string" && value.itemId.trim() ? value.itemId.trim().slice(0, 40) : undefined;
+  return itemId ? { text, itemId } : { text };
+}
+
+/** Record or clear one checklist mark. Does not push an undo snapshot or a patch. */
+export function setChecklistChecked(book: Roadbook, rowId: string, checked: boolean, now = new Date()): PatchResult {
+  const current = normalizeRoadbook(book);
+  if (!current.verifyChecklist.some((item) => item.id === rowId)) {
+    return { ok: false, error: "没有这条核实项。", book: current };
+  }
+  const verifyChecklist = current.verifyChecklist.map((item) => {
+    if (item.id !== rowId) return item;
+    if (!checked) return checklistIdentity(item);
+    return { ...checklistIdentity(item), checkedAt: now.toISOString() };
+  });
+  return {
+    ok: true,
+    book: {
+      ...current,
+      verifyChecklist,
+      updatedAt: now.toISOString(),
+    },
+  };
+}
+
 export function applyPatch(book: Roadbook, request: PatchRequest, now = new Date()): PatchResult {
+  const currentBook = normalizeRoadbook(book);
   const patchId = request.id?.trim() || `p_${now.getTime().toString(36)}`;
-  if (book.patchHistory.some((patch) => patch.id === patchId)) {
-    return { ok: true, book: normalizeRoadbookUndo(book) };
+  if (currentBook.patchHistory.some((patch) => patch.id === patchId)) {
+    return { ok: true, book: currentBook };
   }
   let assumptions: Assumption[] | undefined;
   try {
     const read = readAssumptions(request.assumptions);
-    if (typeof read === "string") return { ok: false, error: read, book };
+    if (typeof read === "string") return { ok: false, error: read, book: currentBook };
     assumptions = read;
   } catch (error) {
     const message = error instanceof Error ? error.message : "假设标签无效。";
-    return { ok: false, error: message, book };
+    return { ok: false, error: message, book: currentBook };
   }
-  const projected = projectPatch(book, request);
-  if (!projected.ok) return { ok: false, error: projected.error, book };
+  const projected = projectPatch(currentBook, request);
+  if (!projected.ok) return { ok: false, error: projected.error, book: currentBook };
 
-  const verifyChecklist: VerifyItem[] = book.verifyChecklist.map((item) => ({ ...item }));
-  for (const text of request.verifyAdds ?? []) {
-    const clean = text.trim().slice(0, 200);
-    if (!clean || verifyChecklist.some((item) => item.text === clean)) continue;
-    verifyChecklist.push({ id: `v_${patchId}_${verifyChecklist.length}`, text: clean });
+  const verifyChecklist: VerifyItem[] = currentBook.verifyChecklist.map((item) => ({ ...item }));
+  for (const add of request.verifyAdds ?? []) {
+    const parsed = readVerifyAdd(add);
+    if (!parsed || verifyChecklist.some((item) => item.text === parsed.text)) continue;
+    const row: VerifyItem = { id: `v_${patchId}_${verifyChecklist.length}`, text: parsed.text };
+    if (parsed.itemId) row.itemId = parsed.itemId;
+    verifyChecklist.push(row);
   }
 
   const applied: AppliedPatch = {
@@ -611,67 +789,76 @@ export function applyPatch(book: Roadbook, request: PatchRequest, now = new Date
     label: request.label.slice(0, 80) || "补丁",
     kind: request.kind,
     ops: request.ops.map(cloneOp),
-    dropped: droppedBy(book, request.ops),
+    dropped: droppedBy(currentBook, request.ops),
   };
   const undo = [
-    ...readUndoStack(book.undo).map(cloneSnapshot),
+    ...readUndoStack(currentBook.undo).map(cloneSnapshot),
     cloneSnapshot({
       patchId,
-      items: book.items,
-      assumptions: book.assumptions,
-      weather: book.weather,
-      verifyChecklist: book.verifyChecklist,
-      title: book.title,
-      city: book.city,
-      startDate: book.startDate,
-      question: book.question,
-      statusLine: book.statusLine,
+      items: currentBook.items,
+      assumptions: currentBook.assumptions,
+      weather: currentBook.weather,
+      verifyChecklist: currentBook.verifyChecklist,
+      title: currentBook.title,
+      city: currentBook.city,
+      startDate: currentBook.startDate,
+      question: currentBook.question,
+      statusLine: currentBook.statusLine,
+      style: readStyle(currentBook.style),
+      mainPlanId: currentBook.mainPlanId ?? null,
+      styleDirty: currentBook.styleDirty === true,
     }),
   ].slice(-UNDO_STACK_LIMIT);
+  const styleDirty = currentBook.style && request.kind !== "style" ? true : currentBook.styleDirty === true;
   const next: Roadbook = {
-    ...cloneBook(book),
-    title: request.title?.trim().slice(0, 80) || book.title,
-    city: request.city?.trim().slice(0, 40) || book.city,
-    startDate: request.startDate?.trim() || book.startDate,
-    assumptions: markAssumptions(book.assumptions, assumptions),
+    ...cloneBook(currentBook),
+    title: request.title?.trim().slice(0, 80) || currentBook.title,
+    city: request.city?.trim().slice(0, 40) || currentBook.city,
+    startDate: request.startDate?.trim() || currentBook.startDate,
+    assumptions: markAssumptions(currentBook.assumptions, assumptions),
     items: projected.items,
     verifyChecklist,
-    question: request.setQuestion === undefined ? book.question : request.setQuestion,
+    question: request.setQuestion === undefined ? currentBook.question : request.setQuestion,
     statusLine: (request.statusNote ?? `已应用：${request.label}`).slice(0, 180),
     updatedAt: now.toISOString(),
-    patchHistory: [...book.patchHistory, applied].slice(-30),
+    patchHistory: [...currentBook.patchHistory, applied].slice(-30),
     undo,
+    styleDirty,
   };
-  return { ok: true, book: next };
+  return { ok: true, book: retainMainPlans(next) };
 }
 
 export function undoLast(book: Roadbook, now = new Date()): PatchResult {
-  const stack = readUndoStack(book.undo).map(cloneSnapshot);
+  const currentBook = normalizeRoadbook(book);
+  const stack = readUndoStack(currentBook.undo).map(cloneSnapshot);
   const snapshot = stack[stack.length - 1];
-  if (!snapshot) return { ok: false, error: "没有可撤销的补丁。", book };
+  if (!snapshot) return { ok: false, error: "没有可撤销的补丁。", book: currentBook };
   const items = snapshot.items.map(cloneItem);
-  const lockError = undoLockError(book, items, snapshot.patchId);
-  if (lockError) return { ok: false, error: lockError, book };
+  const lockError = undoLockError(currentBook, items, snapshot.patchId);
+  if (lockError) return { ok: false, error: lockError, book: currentBook };
   const next: Roadbook = {
-    ...cloneBook(book),
+    ...cloneBook(currentBook),
     items,
-    assumptions: markUndoneAssumptions(snapshot.assumptions, book.assumptions),
+    assumptions: markUndoneAssumptions(snapshot.assumptions, currentBook.assumptions),
     weather: snapshot.weather.map((item) => ({ ...item })),
-    verifyChecklist: restoreChecklist(snapshot.verifyChecklist, book.verifyChecklist),
+    verifyChecklist: restoreChecklist(snapshot.verifyChecklist, currentBook.verifyChecklist),
     title: snapshot.title,
     city: snapshot.city,
     startDate: snapshot.startDate,
     question: snapshot.question ? { ...snapshot.question } : null,
     statusLine: "已撤销上一次改动。",
-    patchHistory: book.patchHistory.filter((patch) => patch.id !== snapshot.patchId),
+    patchHistory: currentBook.patchHistory.filter((patch) => patch.id !== snapshot.patchId),
     undo: stack.slice(0, -1),
     updatedAt: now.toISOString(),
+    style: readStyle(snapshot.style),
+    mainPlanId: snapshot.mainPlanId ?? null,
+    styleDirty: snapshot.styleDirty === true,
   };
   for (const item of next.items) {
-    const previous = book.items.find((current) => current.id === item.id);
+    const previous = currentBook.items.find((current) => current.id === item.id);
     item.highlight = !previous || !sameItemContent(previous, item);
   }
-  return { ok: true, book: next };
+  return { ok: true, book: retainMainPlans(next) };
 }
 
 export function replaceWeather(book: Roadbook, weather: Roadbook["weather"], now = new Date()): Roadbook {
