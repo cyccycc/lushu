@@ -38,6 +38,7 @@ export {
   targetDayIndex,
 } from "./time";
 export { applyRoadbookStyle, describeStyles } from "./style";
+export { isWrapPunctuation, wrapMeasuredText } from "./wrap";
 export type { StyleApplyResult, StyleChoice, StyleName } from "./style";
 export { classifyBookKey, shareView } from "./share";
 export type { BookKeyKind, SharedItinerary, SharedItem } from "./share";

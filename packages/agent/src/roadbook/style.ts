@@ -79,9 +79,15 @@ function noteForStyle(current: string | undefined, sentence: string, previousTit
   return appendStyleNote(current, sentence);
 }
 
+/** 必去 sights stay at their own duration. These styles may still drop 可砍 items and shorten the rest. */
+function keepsMustSeeDuration(item: RoadbookItem): boolean {
+  return item.type === "景点" && item.priority === "必去";
+}
+
 function relax(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookItem[] {
   return items.flatMap((item) => {
     if (!inScope(book, item, now)) return [item];
+    if (keepsMustSeeDuration(item)) return [item];
     if (item.priority === "可砍" && (item.type === "自由" || item.type === "景点")) return [];
     if (item.type !== "景点" || item.durationMinutes <= 75) return [item];
     return [
@@ -153,6 +159,7 @@ function rainy(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookItem[]
 function lessWalking(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookItem[] {
   return items.flatMap((item) => {
     if (!inScope(book, item, now)) return [item];
+    if (keepsMustSeeDuration(item)) return [item];
     if (item.priority === "可砍" && item.type === "自由") return [];
     const longSight = item.type === "景点" && item.durationMinutes > 60;
     const longWalk = (item.travelEstimateMinutes ?? 0) > 15;

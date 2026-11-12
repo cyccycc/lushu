@@ -18,6 +18,7 @@ import {
   type Roadbook,
   type RoadbookItem,
   type RoadbookStyle,
+  type SourceKind,
   type UndoSnapshot,
   type VerifyItem,
   UNDO_STACK_LIMIT,
@@ -644,12 +645,11 @@ export function opsFromUnknown(raw: unknown): { ops: PatchOp[] } | { error: stri
     }
     if (record.op === "update" && typeof record.id === "string") {
       // Wrapped {op,id,fields} stays valid. A flat update puts those same fields beside op and id.
-      if (isPlainObject(record.fields)) {
-        ops.push({ op: "update", id: record.id, fields: pickItemFields(record.fields) });
-        continue;
-      }
-      if (hasItemField(record)) {
-        ops.push({ op: "update", id: record.id, fields: pickItemFields(record) });
+      const source = isPlainObject(record.fields) ? record.fields : hasItemField(record) ? record : null;
+      if (source) {
+        const fields = pickItemFields(source);
+        // `locked` is not a model field. An update that only carried it is not a change.
+        if (Object.keys(fields).length > 0) ops.push({ op: "update", id: record.id, fields });
         continue;
       }
     }
@@ -668,6 +668,87 @@ export function opsFromUnknown(raw: unknown): { ops: PatchOp[] } | { error: stri
     return { error: "有一条补丁无法解析。" };
   }
   return { ops };
+}
+
+const MODEL_CLAIM = /来自你的原话|你改的时间/g;
+
+/** Model copy must not wear a user-stated label. Real user edits keep these phrases. */
+export function stripModelClaim(text: string): string {
+  if (!text.includes("来自你的原话") && !text.includes("你改的时间")) return text;
+  const next = text
+    .replace(MODEL_CLAIM, "")
+    .replace(/[·・]{2,}/g, "·")
+    .replace(/^[·・\s。，、；：]+|[·・\s]+$/g, "")
+    .replace(/。{2,}/g, "。")
+    .trim();
+  return next === "实测" ? "" : next;
+}
+
+function nonempty(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+/** 检索 survives only with both a URL and a fetch time. Every other kind becomes 推断. */
+export function sanitizeModelSource(source: ItemSource): ItemSource {
+  const url = nonempty(source.url);
+  const fetchedAt = nonempty(source.fetchedAt);
+  const kind: SourceKind = source.kind === "检索" && url && fetchedAt ? "检索" : "推断";
+  const note = typeof source.note === "string" ? stripModelClaim(source.note) : "";
+  const next: ItemSource = { kind };
+  if (url) next.url = url;
+  if (fetchedAt) next.fetchedAt = fetchedAt;
+  if (note) next.note = note;
+  return next;
+}
+
+function sanitizeModelFields(fields: ItemFields): ItemFields {
+  const next: ItemFields = { ...fields };
+  delete next.locked;
+  if (next.source) next.source = sanitizeModelSource(next.source);
+  if (typeof next.note === "string") next.note = stripModelClaim(next.note);
+  return next;
+}
+
+function sanitizeModelItem(item: RoadbookItem): RoadbookItem {
+  const note = typeof item.note === "string" ? stripModelClaim(item.note) : "";
+  return {
+    ...item,
+    locked: false,
+    source: sanitizeModelSource(item.source),
+    note: note || undefined,
+  };
+}
+
+function hasPatchFields(fields: ItemFields): boolean {
+  return Object.values(fields).some((value) => value !== undefined);
+}
+
+/** Model ops only. Drops a lock-only update and refuses a fake 实测 / 来自你的原话 label. */
+export function sanitizeModelOps(ops: PatchOp[]): PatchOp[] {
+  const next: PatchOp[] = [];
+  for (const op of ops) {
+    if (op.op === "remove" || op.op === "reorder") {
+      next.push(op);
+      continue;
+    }
+    if (op.op === "add") {
+      next.push({ op: "add", item: sanitizeModelItem(op.item) });
+      continue;
+    }
+    const fields = sanitizeModelFields(op.fields);
+    if (!hasPatchFields(fields)) continue;
+    next.push({ op: "update", id: op.id, fields });
+  }
+  return next;
+}
+
+function modelPatchIsEmpty(request: PatchRequest, ops: PatchOp[]): boolean {
+  if (request.kind !== "model" || ops.length > 0) return false;
+  if (request.assumptions != null || request.title != null || request.city != null || request.startDate != null) {
+    return false;
+  }
+  if (request.verifyAdds != null && request.verifyAdds.length > 0) return false;
+  return request.setQuestion === undefined;
 }
 
 export function endsAfterDay(item: RoadbookItem, limit = DAY_END_MINUTES): boolean {
@@ -810,6 +891,9 @@ export function applyPatch(book: Roadbook, request: PatchRequest, now = new Date
   if (currentBook.patchHistory.some((patch) => patch.id === patchId)) {
     return { ok: true, book: currentBook };
   }
+  const ops = request.kind === "model" ? sanitizeModelOps(request.ops) : request.ops;
+  if (modelPatchIsEmpty(request, ops)) return { ok: true, book: currentBook };
+  const effective: PatchRequest = { ...request, ops };
   let assumptions: Assumption[] | undefined;
   try {
     const read = readAssumptions(request.assumptions);
@@ -819,7 +903,7 @@ export function applyPatch(book: Roadbook, request: PatchRequest, now = new Date
     const message = error instanceof Error ? error.message : "假设标签无效。";
     return { ok: false, error: message, book: currentBook };
   }
-  const projected = projectPatch(currentBook, request);
+  const projected = projectPatch(currentBook, effective);
   if (!projected.ok) return { ok: false, error: projected.error, book: currentBook };
 
   const verifyChecklist: VerifyItem[] = currentBook.verifyChecklist.map((item) => ({ ...item }));
@@ -836,8 +920,8 @@ export function applyPatch(book: Roadbook, request: PatchRequest, now = new Date
     at: request.at ?? now.toISOString(),
     label: request.label.slice(0, 80) || "补丁",
     kind: request.kind,
-    ops: request.ops.map(cloneOp),
-    dropped: droppedBy(currentBook, request.ops),
+    ops: effective.ops.map(cloneOp),
+    dropped: droppedBy(currentBook, effective.ops),
   };
   const undo = [
     ...readUndoStack(currentBook.undo).map(cloneSnapshot),

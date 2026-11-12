@@ -34,6 +34,8 @@ import {
   describeStyles,
   factMark,
   forecastDaysThrough,
+  isWrapPunctuation,
+  wrapMeasuredText,
   formatTime,
   normalizeRoadbook,
   normalizeWeatherQuery,
@@ -4026,11 +4028,27 @@ function assertWaveFixes(): string | null {
   const easy = applyRoadbookStyle(opened, "更轻松", false, now);
   if (!easy.ok) return easy.confirm ? easy.note : easy.error;
   const styledNamed = easy.book.items.find((item) => item.id === named.id);
-  if (!styledNamed?.note?.includes("你点名要去的地方")) return `更轻松不应盖掉原备注：${styledNamed?.note}`;
-  if (named.durationMinutes > 75 && styledNamed.durationMinutes !== 75) {
-    return `未锁定的更轻松应把 ${named.durationMinutes} 分钟收到 75，得到 ${styledNamed.durationMinutes}`;
+  if (named.priority !== "必去" || named.type !== "景点" || named.durationMinutes <= 75) {
+    return `点名的乌镇应是超过 75 分钟的必去景点，得到 ${named.priority} ${named.durationMinutes}`;
   }
-  if (named.durationMinutes > 75 && !styledNamed.note.includes("更轻松")) return "风格说明应接在原备注后面";
+  if (!styledNamed || styledNamed.durationMinutes !== named.durationMinutes || styledNamed.note !== named.note) {
+    return `更轻松应保留必去「${named.title}」的 ${named.durationMinutes} 分钟，得到 ${styledNamed?.durationMinutes} ${styledNamed?.note ?? ""}`;
+  }
+  const optional = opened.items.find((item) => item.type === "景点" && item.priority !== "必去" && item.durationMinutes > 75);
+  const optionalEasy = easy.book.items.find((item) => item.id === optional?.id);
+  if (!optional || optionalEasy?.durationMinutes !== 75 || !optionalEasy.note?.includes("更轻松")) {
+    return `更轻松仍应把非必去的长景点收到 75 分钟，得到 ${optional?.title ?? "无"} ${optionalEasy?.durationMinutes}`;
+  }
+  const lessWalk = applyRoadbookStyle(opened, "少走路", false, now);
+  if (!lessWalk.ok) return lessWalk.confirm ? lessWalk.note : lessWalk.error;
+  const walkedNamed = lessWalk.book.items.find((item) => item.id === named.id);
+  const walkedOptional = lessWalk.book.items.find((item) => item.id === optional.id);
+  if (!walkedNamed || walkedNamed.durationMinutes !== named.durationMinutes || walkedNamed.note !== named.note) {
+    return `少走路应保留必去「${named.title}」的时长，得到 ${walkedNamed?.durationMinutes} ${walkedNamed?.note ?? ""}`;
+  }
+  if (walkedOptional?.durationMinutes !== 60) {
+    return `少走路仍应把非必去的长景点收到 60 分钟，得到 ${walkedOptional?.title ?? "无"} ${walkedOptional?.durationMinutes}`;
+  }
   const heldNamed = {
     ...wuzhen,
     items: wuzhen.items.map((item) => (item.id === named.id ? { ...item, locked: true } : item)),
@@ -4207,6 +4225,14 @@ function lunchOn(book: Roadbook, day: number): RoadbookItem | undefined {
   });
 }
 
+function breakfastOn(book: Roadbook, day: number): RoadbookItem | undefined {
+  return book.items.find((item) => {
+    if (item.type !== "餐" || item.dayIndex !== day) return false;
+    const start = parseTime(item.startTime) ?? -1;
+    return start < 11 * 60;
+  });
+}
+
 function assertModelPatchParse(): string | null {
   for (const op of ["add", "update", "remove", "reorder"] as const) {
     if (!modelPatchSystem.includes(`"op":"${op}"`)) return `系统提示缺少 ${op} 的 JSON 示例`;
@@ -4277,6 +4303,173 @@ function assertModelPatchParse(): string | null {
   if (!("error" in empty) || empty.error !== "有一条补丁无法解析。") {
     return `没有字段的 update 应无法解析，得到 ${"error" in empty ? empty.error : "成功"}`;
   }
+
+  const claimError = assertModelClaimRefusal(book, sight);
+  if (claimError) return claimError;
+  return null;
+}
+
+function spokenClaim(item: RoadbookItem): string {
+  return `${item.source.kind}·${item.source.note ?? ""}·${item.note ?? ""}`;
+}
+
+function assertModelClaimRefusal(book: Roadbook, sight: RoadbookItem): string | null {
+  const other = book.items.find((item) => item.id !== sight.id && item.type === "景点" && !item.locked);
+  if (!other) return "模型补丁用例缺少第二处景点";
+  const undoBefore = book.undo.length;
+  const historyBefore = book.patchHistory.length;
+
+  const flat = opsFromUnknown({
+    ops: [
+      {
+        op: "update",
+        id: sight.id,
+        source: { kind: "实测", note: "来自你的原话" },
+        note: "实测·来自你的原话",
+      },
+    ],
+  });
+  if ("error" in flat) return `假装实测的平铺补丁应能解析：${flat.error}`;
+  const landed = applyPatch(book, { id: "p_flat_lie", label: "假装实测", kind: "model", ops: flat.ops });
+  if (!landed.ok) return landed.error;
+  const lied = landed.book.items.find((item) => item.id === sight.id);
+  if (!lied || lied.source.kind !== "推断" || spokenClaim(lied).includes("来自你的原话") || spokenClaim(lied).includes("你改的时间")) {
+    return `模型补丁不能落成实测·来自你的原话，得到 ${lied ? spokenClaim(lied) : "无"}`;
+  }
+  if (spokenClaim(lied).includes("实测")) return `模型补丁不应留下实测，得到 ${spokenClaim(lied)}`;
+
+  const searched = applyPatch(book, {
+    id: "p_search",
+    label: "检索",
+    kind: "model",
+    ops: [
+      {
+        op: "update",
+        id: sight.id,
+        fields: {
+          source: {
+            kind: "检索",
+            url: "https://example.com/xian",
+            fetchedAt: "2026-11-01T00:00:00.000Z",
+            note: "来自你的原话",
+          },
+        },
+      },
+    ],
+  });
+  if (!searched.ok) return searched.error;
+  const cited = searched.book.items.find((item) => item.id === sight.id);
+  if (cited?.source.kind !== "检索" || cited.source.url !== "https://example.com/xian" || !cited.source.fetchedAt) {
+    return `带链接和取数时间的检索应保留，得到 ${cited?.source.kind} ${cited?.source.url ?? ""}`;
+  }
+  if ((cited.source.note ?? "").includes("来自你的原话") || (cited.note ?? "").includes("来自你的原话")) {
+    return "检索备注里的来自你的原话也应去掉";
+  }
+  const bareSearch = applyPatch(book, {
+    id: "p_search_bare",
+    label: "只有链接",
+    kind: "model",
+    ops: [
+      {
+        op: "update",
+        id: sight.id,
+        fields: { source: { kind: "检索", url: "https://example.com/xian", note: "只有链接" } },
+      },
+    ],
+  });
+  if (!bareSearch.ok) return bareSearch.error;
+  const bare = bareSearch.book.items.find((item) => item.id === sight.id);
+  if (bare?.source.kind !== "推断" || bare.source.note !== "只有链接") {
+    return `没有取数时间的检索应改成推断，得到 ${bare?.source.kind} ${bare?.source.note ?? ""}`;
+  }
+
+  const added = applyPatch(book, {
+    id: "p_add_lie",
+    label: "加上假实测",
+    kind: "model",
+    ops: [
+      {
+        op: "add",
+        item: {
+          ...sight,
+          id: "i_claim",
+          title: "书院门",
+          locked: true,
+          source: { kind: "实测", note: "你改的时间" },
+          note: "你改的时间。下午去。",
+        },
+      },
+    ],
+  });
+  if (!added.ok) return added.error;
+  const created = added.book.items.find((item) => item.id === "i_claim");
+  if (!created || created.locked || created.source.kind !== "推断" || created.note !== "下午去。") {
+    return `新增项也不能写成你改的时间，得到 locked=${created?.locked} ${created ? spokenClaim(created) : "无"}`;
+  }
+  if (spokenClaim(created).includes("你改的时间") || spokenClaim(created).includes("来自你的原话")) {
+    return `新增项仍带着原话标签：${spokenClaim(created)}`;
+  }
+
+  const userClock = applyPatch(book, {
+    id: "p_user_claim",
+    label: "用户改的",
+    kind: "user",
+    ops: [
+      {
+        op: "update",
+        id: sight.id,
+        fields: { source: { kind: "实测", note: "你改的时间" }, note: "来自你的原话" },
+      },
+    ],
+  });
+  if (!userClock.ok) return userClock.error;
+  const kept = userClock.book.items.find((item) => item.id === sight.id);
+  if (kept?.source.kind !== "实测" || kept.source.note !== "你改的时间" || kept.note !== "来自你的原话") {
+    return `用户自己的修改仍应保留实测和原话，得到 ${kept ? spokenClaim(kept) : "无"}`;
+  }
+
+  const onlyLock = opsFromUnknown({ ops: [{ op: "update", id: sight.id, locked: true }] });
+  const wrappedLock = opsFromUnknown({ ops: [{ op: "update", id: sight.id, fields: { locked: true } }] });
+  if ("error" in onlyLock || onlyLock.ops.length !== 0 || "error" in wrappedLock || wrappedLock.ops.length !== 0) {
+    return "只写 locked 的模型 update 应被丢掉";
+  }
+  const noop = applyPatch(book, { id: "p_lock_only", label: "只锁", kind: "model", ops: onlyLock.ops });
+  if (!noop.ok) return noop.error;
+  const directEmpty = applyPatch(book, {
+    id: "p_empty_fields",
+    label: "空字段",
+    kind: "model",
+    ops: [{ op: "update", id: sight.id, fields: {} }],
+  });
+  if (!directEmpty.ok) return directEmpty.error;
+  if (
+    noop.book.undo.length !== undoBefore ||
+    noop.book.patchHistory.length !== historyBefore ||
+    directEmpty.book.undo.length !== undoBefore ||
+    directEmpty.book.patchHistory.length !== historyBefore
+  ) {
+    return "空的模型补丁不应占用撤销";
+  }
+  if (noop.book.items.find((item) => item.id === sight.id)?.locked) return "只写 locked 不应把项锁上";
+
+  const mixed = opsFromUnknown({
+    ops: [
+      { op: "update", id: sight.id, locked: true },
+      { op: "update", id: other.id, title: "书院门", note: "来自你的原话" },
+    ],
+  });
+  if ("error" in mixed || mixed.ops.length !== 1 || mixed.ops[0]?.op !== "update" || mixed.ops[0].id !== other.id) {
+    return "混合补丁应只留下有内容的那条";
+  }
+  const mixedApplied = applyPatch(book, { id: "p_mixed_lock", label: "混合", kind: "model", ops: mixed.ops });
+  if (!mixedApplied.ok) return mixedApplied.error;
+  const mixedSight = mixedApplied.book.items.find((item) => item.id === sight.id);
+  const mixedOther = mixedApplied.book.items.find((item) => item.id === other.id);
+  if (mixedSight?.title !== sight.title || mixedSight.locked) return "混合补丁不应改只写了 locked 的项";
+  if (mixedOther?.title !== "书院门" || (mixedOther.note ?? "").includes("来自你的原话")) {
+    return `混合补丁应改另一项并去掉原话，得到 ${mixedOther?.title} ${mixedOther?.note ?? ""}`;
+  }
+  if (mixedApplied.book.undo.length !== undoBefore + 1) return "混合补丁应只占用一步撤销";
   return null;
 }
 
@@ -4402,6 +4595,41 @@ function assertMealToday(): string | null {
   if (!menuEnded.request) return menuEnded.note || "行程结束后，点某一项仍应能挪时间";
   const menuEndedId = menuEnded.request.ops.find((op) => op.op === "update" && op.fields.startTime === "13:00");
   if (!menuEndedId || menuEndedId.op !== "update" || menuEndedId.id !== day1.id) return "结束后的挪时间应仍改点中的那一项";
+
+  const day1Breakfast = breakfastOn(built, 1);
+  const day2Breakfast = breakfastOn(built, 2);
+  if (day1Breakfast) return "北京两天的第 1 天早上应是去程，没有早饭";
+  if (!day2Breakfast) return "北京两天的第 2 天应有早饭";
+  const breakfast = planMessage(built, "把早饭改到 8:00", random, builtNow);
+  if (!breakfast.request) return breakfast.note || "出发前应能改到最早有早饭的那一天";
+  const breakfastId = breakfast.request.ops.find((op) => op.op === "update" && op.fields.startTime === "08:00");
+  if (!breakfastId || breakfastId.op !== "update" || breakfastId.id !== day2Breakfast.id) {
+    return "出发前「把早饭改到 8:00」应改第 2 天的早饭";
+  }
+  const breakfastApplied = applyPatch(built, { ...breakfast.request, id: "p_breakfast_before" });
+  if (!breakfastApplied.ok) return breakfastApplied.error;
+  const movedBreakfast = breakfastApplied.book.items.find((item) => item.id === day2Breakfast.id);
+  if (movedBreakfast?.startTime !== "08:00" || movedBreakfast.source.kind !== "实测" || movedBreakfast.source.note !== "你改的时间") {
+    return `第 2 天早饭应改到 08:00 并标成你改的时间，得到 ${movedBreakfast?.startTime} ${movedBreakfast?.source.kind} ${movedBreakfast?.source.note}`;
+  }
+  const noBreakfast: Roadbook = {
+    ...built,
+    items: built.items.filter((item) => item.id !== day2Breakfast.id),
+  };
+  const missingBreakfast = planMessage(noBreakfast, "把早饭改到 8:00", random, builtNow);
+  if (missingBreakfast.request || missingBreakfast.note !== "没有找到要改时间的项。") {
+    return `没有早饭时应说明没找到，得到 ${missingBreakfast.note || "改了"}`;
+  }
+  const endedBreakfast = planMessage(onTrip, "把早饭改到 8:00", random, new Date("2026-11-12T04:00:00.000Z"));
+  if (endedBreakfast.request || endedBreakfast.note !== "行程已经结束，没有改早饭。") {
+    return `行程结束后不应改早饭，得到 ${endedBreakfast.note || "改了"}`;
+  }
+  const menuBreakfast = planItemMove(onTrip, day2Breakfast.id, "08:00");
+  if (!menuBreakfast.request) return menuBreakfast.note || "行程结束后，点早饭仍应能挪时间";
+  const menuBreakfastId = menuBreakfast.request.ops.find((op) => op.op === "update" && op.fields.startTime === "08:00");
+  if (!menuBreakfastId || menuBreakfastId.op !== "update" || menuBreakfastId.id !== day2Breakfast.id) {
+    return "结束后点早饭挪时间应仍改点中的那一顿";
+  }
   return null;
 }
 
@@ -4419,10 +4647,17 @@ function itemChanged(before: Roadbook, after: Roadbook): boolean {
   });
 }
 
-/** Real model: 换一个 (no template left) and 模型修补 must each change an item. Skips when no key is configured. */
-async function assertLiveModelPatch(): Promise<string | null> {
-  if (!hasLlmKey()) return null;
-  const env = readLlmEnv();
+type XianLiveBooks = {
+  swap: Roadbook;
+  swapText: string;
+  refine: Roadbook;
+};
+
+/**
+ * Real 西安 7 天 draft. A free template fails here instead of being filled with a 兵马俑 clone.
+ * 模型修补 only renames 兵马俑 on that same draft.
+ */
+function xianLiveBooks(): XianLiveBooks | string {
   const now = new Date("2026-11-01T02:00:00.000Z");
   let n = 0;
   const random = () => `lv${(n += 1)}`;
@@ -4431,31 +4666,55 @@ async function assertLiveModelPatch(): Promise<string | null> {
     draft.items.find((item) => item.type === "景点" && item.title.includes("兵马俑")) ??
     draft.items.find((item) => item.type === "景点");
   if (!host) return "在线模型补丁缺少景点";
-  const unlocked = draft.items.map((item) => ({ ...item, locked: false }));
-  const names = cityTemplateNames(draft.city);
-  const missing = names.filter((name) => name !== host.title && !unlocked.some((item) => item.title === name));
-  const filled: Roadbook = {
-    ...draft,
-    items: [
-      ...unlocked,
-      ...missing.map((name, index) => ({
-        ...host,
-        id: `live_fill_${index}`,
-        title: name,
-        locked: false,
-        note: "占位",
-      })),
-    ],
+  const choice = chooseItemSwap(draft, host.id, true);
+  if (choice.mode !== "model") {
+    return `西安 7 天的换一个应走模型（模板已经排完），得到 ${choice.mode}：${choice.note}`;
+  }
+  return {
+    swap: draft,
+    swapText: choice.text,
+    refine: {
+      ...draft,
+      items: draft.items.map((item) => (item.id === host.id ? { ...item, title: "城墙", note: undefined } : item)),
+    },
   };
-  const choice = chooseItemSwap(filled, host.id, true);
-  if (choice.mode !== "model") return `兵马俑换一个应走模型，得到 ${choice.mode}`;
-  const vague: Roadbook = {
-    ...draft,
-    items: unlocked.map((item) => (item.id === host.id ? { ...item, title: "待定", note: undefined } : item)),
-  };
+}
+
+function assertXianSwapExhausted(): string | null {
+  const books = xianLiveBooks();
+  return typeof books === "string" ? books : null;
+}
+
+function assertPosterWrap(): string | null {
+  const width = (value: string) => Array.from(value).length;
+  if (!isWrapPunctuation("。") || !isWrapPunctuation("，") || !isWrapPunctuation(")") || isWrapPunctuation("甲")) {
+    return "换行标点应认出句号、逗号和右括号";
+  }
+  const joined = wrapMeasuredText("甲乙。", 10, width);
+  if (joined.length !== 1 || joined[0] !== "甲乙。") return `放得下的句子不应换行：${joined.join("|")}`;
+  const pulled = wrapMeasuredText("甲乙。", 2, width);
+  if (pulled.join("|") !== "甲|乙。") return `句号不应另起一行：${pulled.join("|")}`;
+  const comma = wrapMeasuredText("去吃饭，然后", 3, width);
+  if (comma.join("|") !== "去吃|饭，然|后") return `逗号应跟在上一字后面：${comma.join("|")}`;
+  const ascii = wrapMeasuredText("Hello).", 5, width);
+  if (ascii.join("|") !== "Hell|o).") return `右括号不应另起一行：${ascii.join("|")}`;
+  const stuck = wrapMeasuredText("甲。", 1, width);
+  if (stuck.join("|") !== "甲|。") return `上一行只剩一个字时可以让标点另起一行：${stuck.join("|")}`;
+  const paragraph = wrapMeasuredText("上午去城墙，下午看博物馆。", 6, width);
+  const opened = paragraph.slice(1).find((line) => isWrapPunctuation(Array.from(line)[0] ?? ""));
+  if (opened) return `换行不应以标点开头：${paragraph.join("|")}`;
+  return null;
+}
+
+/** Real model: 换一个 (no template left) and 模型修补 must each change an item. Skips when no key is configured. */
+async function assertLiveModelPatch(): Promise<string | null> {
+  if (!hasLlmKey()) return null;
+  const env = readLlmEnv();
+  const books = xianLiveBooks();
+  if (typeof books === "string") return books;
   const cases: { label: string; book: Roadbook; text: string | null }[] = [
-    { label: "换一个", book: filled, text: choice.text },
-    { label: "模型修补", book: vague, text: null },
+    { label: "换一个", book: books.swap, text: books.swapText },
+    { label: "模型修补", book: books.refine, text: null },
   ];
   const problems = await mapFixtures(cases, LIVE_CONCURRENCY, async (item) => {
     try {
@@ -4561,7 +4820,7 @@ async function main(): Promise<void> {
     console.error(`model-patch  ${patchShapeError}`);
     process.exit(1);
   }
-  console.log("  ok flat and wrapped model patches");
+  console.log("  ok flat and wrapped model patches, claim refusal, empty lock");
   const styleNoteError = assertStyleNotesAndLocks();
   if (styleNoteError) {
     console.error(`style-note  ${styleNoteError}`);
@@ -4573,7 +4832,19 @@ async function main(): Promise<void> {
     console.error(`meal-today  ${mealTodayError}`);
     process.exit(1);
   }
-  console.log("  ok lunch follows today during the trip");
+  console.log("  ok lunch follows today; breakfast before departure uses the first day that has it");
+  const xianSwapError = assertXianSwapExhausted();
+  if (xianSwapError) {
+    console.error(`xian-swap  ${xianSwapError}`);
+    process.exit(1);
+  }
+  console.log("  ok xi'an 7-day swap has no template left");
+  const wrapError = assertPosterWrap();
+  if (wrapError) {
+    console.error(`poster-wrap  ${wrapError}`);
+    process.exit(1);
+  }
+  console.log("  ok poster wrap keeps punctuation off the next line");
   const shareKeyError = await assertShareKeyWrites();
   if (shareKeyError) {
     console.error(`share-key  ${shareKeyError}`);

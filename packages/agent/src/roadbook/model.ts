@@ -1,6 +1,6 @@
 import { chatComplete, type LlmEnv } from "@lushu/llm";
 import { extractJson } from "../json";
-import { opsFromUnknown } from "./patch";
+import { opsFromUnknown, sanitizeModelOps } from "./patch";
 import type { Plan, Roadbook } from "./types";
 
 /** One example of each op. update keeps the changed item fields inside `fields`. */
@@ -93,13 +93,14 @@ export async function proposeModelPatch(
   });
   const parsed = opsFromUnknown(extractJson(result.content));
   if ("error" in parsed) return { request: null, note: parsed.error };
-  if (parsed.ops.length === 0) return { request: null, note: userText ? "模型没有改这一句。" : "模型觉得草稿不用改。" };
+  const ops = sanitizeModelOps(parsed.ops);
+  if (ops.length === 0) return { request: null, note: userText ? "模型没有改这一句。" : "模型觉得草稿不用改。" };
   const note = userText ? "已按你的句子打了补丁。" : "模型补了一小处，没有整份重写。";
   return {
     request: {
       label: userText ? "按句子修改" : "模型修补",
       kind: "model",
-      ops: parsed.ops,
+      ops,
       statusNote: note,
     },
     note,

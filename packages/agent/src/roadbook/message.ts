@@ -69,10 +69,9 @@ function findMealBySlot(book: Roadbook, name: string, now: Date): RoadbookItem |
   if (!target.outOfRange) {
     return matches.filter((item) => item.dayIndex >= target.dayIndex).sort(byTime)[0];
   }
-  // Before departure, day 1. After the trip, caller refuses instead of rewriting day 1.
-  if (shanghaiDate(now) < book.startDate) {
-    return matches.filter((item) => item.dayIndex === 1).sort(byTime)[0];
-  }
+  // Before departure, the earliest day that actually has this meal. Day 1 can be
+  // only the outbound ride. After the trip, nothing: the caller refuses instead of rewriting day 1.
+  if (shanghaiDate(now) < book.startDate) return matches.slice().sort(byTime)[0];
   return undefined;
 }
 

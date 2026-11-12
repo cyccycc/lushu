@@ -8,6 +8,7 @@ import {
   snapForTripDay,
   verifyCue,
   weatherMark,
+  wrapMeasuredText,
   type RoadbookItem,
   type SharedItinerary,
   type WeatherSnap,
@@ -43,19 +44,7 @@ function clockLabel(now: Date): string {
 }
 
 function wrap(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
-  const lines: string[] = [];
-  let line = "";
-  for (const ch of text) {
-    const next = line + ch;
-    if (line && ctx.measureText(next).width > maxWidth) {
-      lines.push(line);
-      line = ch.trim() ? ch : "";
-    } else {
-      line = next;
-    }
-  }
-  if (line) lines.push(line);
-  return lines.length > 0 ? lines : [""];
+  return wrapMeasuredText(text, maxWidth, (value) => ctx.measureText(value).width);
 }
 
 function factText(item: PosterBook["items"][number], now: Date, viewer: "owner" | "share"): string {
