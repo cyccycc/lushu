@@ -6,6 +6,7 @@ export const SEARCH_STALE_MS = 30 * 24 * 60 * 60 * 1000;
 
 const STATED_NOTE = "来自你的原话";
 const EDITED_NOTE = "你改的时间";
+const HTTP_URL = /^https?:\/\//;
 
 /** User-stated appointments. The clock may still be a guess; the fact is not. */
 const USER_ERRAND = /体检|开会|会议/;
@@ -40,10 +41,31 @@ function ageMs(fetchedAt: string | undefined, now: Date): number | null {
   return now.getTime() - at;
 }
 
+function fetchedAtStale(fetchedAt: string | undefined, now: Date): boolean {
+  const age = ageMs(fetchedAt, now);
+  return age != null && age > SEARCH_STALE_MS;
+}
+
 export function isSearchStale(source: ItemSource, now = new Date()): boolean {
   if (source.kind !== "检索") return false;
-  const age = ageMs(source.fetchedAt, now);
-  return age != null && age > SEARCH_STALE_MS;
+  return fetchedAtStale(source.fetchedAt, now);
+}
+
+function usableHttpUrl(url: string | undefined): string | undefined {
+  return url && HTTP_URL.test(url) ? url : undefined;
+}
+
+/**
+ * The user moved the clock and left the title and place alone.
+ * Kind and note become 实测 / 你改的时间. A usable http(s) link stays, with its fetch time.
+ */
+export function sourceAfterUserClock(source: ItemSource): ItemSource {
+  const next: ItemSource = { kind: "实测", note: EDITED_NOTE };
+  const url = usableHttpUrl(source.url);
+  if (!url) return next;
+  next.url = url;
+  if (source.fetchedAt) next.fetchedAt = source.fetchedAt;
+  return next;
 }
 
 export function isWeatherStale(snap: WeatherSnap, now = new Date()): boolean {
@@ -70,20 +92,41 @@ function userStatedErrand(item: Pick<RoadbookItem, "title" | "note" | "source">)
   return true;
 }
 
+function fetchStamp(fetchedAt: string | undefined, now: Date): { fetchedOn?: string; stale: boolean } {
+  const parsed = fetchedAt ? Date.parse(fetchedAt) : Number.NaN;
+  if (!Number.isFinite(parsed)) return { stale: false };
+  return {
+    fetchedOn: shanghaiDate(new Date(parsed)),
+    stale: fetchedAtStale(fetchedAt, now),
+  };
+}
+
 export function factMark(item: Pick<RoadbookItem, "title" | "note" | "source">, now = new Date()): FactMark {
   const source = relabelConfirmedSource(item.source);
   const confirmed = confirmedRemark(source.note);
+  const url = usableHttpUrl(source.url);
   if (source.kind === "检索") {
-    const parsed = source.fetchedAt ? Date.parse(source.fetchedAt) : Number.NaN;
-    const hasDate = Number.isFinite(parsed);
-    const hasUrl = Boolean(source.url && /^https?:\/\//.test(source.url));
+    const fetched = fetchStamp(source.fetchedAt, now);
     return {
       kind: "检索",
       note: source.note,
-      fetchedOn: hasDate ? shanghaiDate(new Date(parsed)) : undefined,
-      url: hasUrl ? source.url : undefined,
-      stale: hasDate && isSearchStale(source, now),
-      unavailable: !hasUrl || !hasDate,
+      fetchedOn: fetched.fetchedOn,
+      url,
+      stale: fetched.stale,
+      unavailable: !url || !fetched.fetchedOn,
+      needsVerify: false,
+    };
+  }
+  // A clock edit is 实测, but the place link is still the one to open and to age.
+  if (source.kind === "实测" && url) {
+    const fetched = fetchStamp(source.fetchedAt, now);
+    return {
+      kind: "实测",
+      note: source.note,
+      fetchedOn: fetched.fetchedOn,
+      url,
+      stale: fetched.stale,
+      unavailable: false,
       needsVerify: false,
     };
   }

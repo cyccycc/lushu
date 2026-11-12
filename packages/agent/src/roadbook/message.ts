@@ -11,6 +11,7 @@ import {
   wantsInferredReturn,
 } from "./draft";
 import { parseZhNumber } from "../parse";
+import { sourceAfterUserClock } from "./honesty";
 import { projectPatch } from "./patch";
 import { formatTime, inferStartDate, inferWeekdayDate, isUnsetWhen, noteForPlacedClock, parseTime, shanghaiDate, targetDayIndex } from "./time";
 import type { PatchOp, Plan, Roadbook, RoadbookItem } from "./types";
@@ -20,7 +21,6 @@ const HAND_EDITED_DETAIL = "已手动修改";
 const SKIPPED_RETURN_VALUE = "这次不补";
 const SKIPPED_RETURN_DETAIL = "超过短途，不再补返程";
 const USER_CLOCK_NOTE = "这个钟点是你改的。";
-const USER_CLOCK_SOURCE = "你改的时间";
 
 function canRefreshReturnChip(item: Roadbook["assumptions"][number]): boolean {
   if (item.detail === HAND_EDITED_DETAIL) return false;
@@ -558,7 +558,7 @@ function clockChange(book: Roadbook, item: RoadbookItem, startTime: string): Pla
   ops.push({
     op: "update",
     id: item.id,
-    fields: { startTime, source: { kind: "实测", note: USER_CLOCK_SOURCE } },
+    fields: { startTime, source: sourceAfterUserClock(item.source) },
   });
   if (item.locked) ops.push({ op: "update", id: item.id, fields: { locked: true } });
   return {
@@ -648,7 +648,7 @@ function planReturnClock(book: Roadbook, item: RoadbookItem, startTime: string):
     fields: {
       startTime,
       note: noteForPlacedClock(USER_CLOCK_NOTE, startTime, ride),
-      source: { kind: "实测", note: USER_CLOCK_SOURCE },
+      source: sourceAfterUserClock(item.source),
     },
   });
   ops.push({ op: "update", id: item.id, fields: { locked: true } });

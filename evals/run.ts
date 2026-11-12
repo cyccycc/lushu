@@ -1,6 +1,7 @@
 import { blockedModelUrlMessage, modelHttpError, publicHttpsBase, readLlmEnv, resolveLlmBase } from "@lushu/llm";
 import { config } from "dotenv";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,7 @@ import {
   TOOL_PROMPTS,
   weatherHeaderText,
   type AgentResult,
+  type ItineraryItem,
   type PlanVariant,
 } from "@lushu/agent";
 import {
@@ -82,12 +84,19 @@ import {
 
 config({ path: path.resolve(process.cwd(), ".env") });
 
+type MorningCheck = {
+  words: string[];
+  startBefore: string;
+};
+
 type Checks = {
   minDays: number;
   keywords: string[];
   budgetIncludes?: string;
   requireRainPlan?: boolean;
   minVariants?: number;
+  /** Opt-in. Exact keywords stay exact for every other fixture. */
+  morning?: MorningCheck;
 };
 
 type Fixture = {
@@ -255,6 +264,10 @@ function checkResult(result: AgentResult, checks: Checks): string | null {
   for (const keyword of checks.keywords) {
     if (!blob.includes(keyword)) return `missing keyword「${keyword}」`;
   }
+  if (checks.morning) {
+    const morningProblem = checkMorningIntent(result, checks.morning);
+    if (morningProblem) return morningProblem;
+  }
   if (checks.budgetIncludes) {
     const notes = result.variants.map((variant) => variant.budgetNote).join("\n");
     if (!budgetMentioned(notes, checks.budgetIncludes)) {
@@ -266,6 +279,154 @@ function checkResult(result: AgentResult, checks: Checks): string | null {
     if (problem) return problem;
   }
   return null;
+}
+
+function clockMinutes(value: string): number | null {
+  return parseTime(value.trim().replace(/：/g, ":"));
+}
+
+/** Planning items keep the clock on `time`. A `startTime` field counts too when a payload has one. */
+function itemStartsBefore(item: ItineraryItem, limit: number): boolean {
+  const clocks = [item.time];
+  const startTime = (item as ItineraryItem & { startTime?: unknown }).startTime;
+  if (typeof startTime === "string") clocks.push(startTime);
+  return clocks.some((value) => {
+    const minutes = clockMinutes(value);
+    return minutes != null && minutes < limit;
+  });
+}
+
+function checkMorningIntent(result: AgentResult, morning: MorningCheck): string | null {
+  const words = morning.words.map((word) => word.trim()).filter(Boolean);
+  const blob = JSON.stringify(result.variants);
+  if (words.some((word) => blob.includes(word))) return null;
+  const limit = clockMinutes(morning.startBefore);
+  if (limit == null) return `早上意图的钟点无法解析：${morning.startBefore}`;
+  for (const variant of result.variants) {
+    for (const day of variant.days) {
+      if (day.items.some((item) => itemStartsBefore(item, limit))) return null;
+    }
+  }
+  const listed = words.map((word) => `「${word}」`).join("、");
+  return `早出门未满足：需要${listed}之一，或有一项开始于 ${morning.startBefore} 之前`;
+}
+
+function samplePlan(options: {
+  city?: string;
+  time: string;
+  detail?: string;
+  startTime?: string;
+  days?: number;
+}): AgentResult {
+  const city = options.city ?? "西安";
+  const days = options.days ?? 5;
+  const item: ItineraryItem & { startTime?: string } = {
+    time: options.time,
+    title: "兵马俑",
+    detail: options.detail ?? `${city}城里慢慢走，错开人多的时候。`,
+  };
+  if (options.startTime) item.startTime = options.startTime;
+  const variant = (id: string): PlanVariant => ({
+    id,
+    title: `${city}五日`,
+    style: "家庭",
+    summary: `${city}五日，错开人多的时候。`,
+    pace: "慢",
+    budgetNote: "费用自己估，这里不报价。",
+    suitability: "和父母",
+    days: Array.from({ length: days }, (_, index) => ({
+      day: index + 1,
+      title: city,
+      city,
+      theme: "错峰",
+      items: [item],
+      meals: ["午饭"],
+      stayNote: "住宿自己看，路书不代订。",
+      rainPlanB: "下雨就改去博物馆。",
+    })),
+    sources: [{ title: "本地说明", kind: "local" }],
+    assumptions: ["五天"],
+    warnings: ["内容由 AI 生成"],
+    aiGenerated: true,
+  });
+  return {
+    spec: {
+      destinations: [city],
+      origin: null,
+      days,
+      daysAssumed: false,
+      party: { summary: "和父母", count: 3, kind: "family" },
+      budgetText: null,
+      budgetAmountCny: null,
+      budgetTight: false,
+      themes: ["family"],
+      constraints: [],
+      whenLabel: null,
+      rawBrief: city,
+    },
+    variants: [variant("a"), variant("b")],
+    contrast: "两套节奏不同",
+    steps: (["planning", "searching", "awaiting_confirm"] as const).map((phase, index) => ({
+      id: `s${index}`,
+      phase,
+      title: phase,
+      detail: "",
+      status: "done",
+      startedAt: "2026-11-01T00:00:00.000Z",
+    })),
+    usage: {
+      steps: 3,
+      toolCalls: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      estimatedUsd: 0,
+      maxSteps: 8,
+      maxToolCalls: 6,
+      maxCostUsd: 0.5,
+    },
+    mode: "fallback",
+    modeNote: "",
+    aiGenerated: true,
+  };
+}
+
+function assertXianMorningCheck(): string | null {
+  const fixture = JSON.parse(readFileSync(path.join(root, "fixtures", "10-xian-family-crowd.json"), "utf8")) as Fixture;
+  if (fixture.checks.minDays !== 5) return "西安用例仍应要求至少 5 天";
+  if (!fixture.checks.keywords.includes("西安") || fixture.checks.keywords.includes("早上")) {
+    return `西安仍应是硬关键词，早上不应再当硬关键词，得到 ${fixture.checks.keywords.join(",")}`;
+  }
+  const morning = fixture.checks.morning;
+  if (!morning || morning.words.join(",") !== "早上,上午,清晨" || morning.startBefore !== "10:00") {
+    return "西安用例应认早上、上午、清晨，或 10:00 前开始的一项";
+  }
+  const quiet = "西安城里慢慢走，错开人多的时候。";
+  const pass = (label: string, result: AgentResult) => {
+    const problem = checkResult(result, fixture.checks);
+    return problem ? `${label} 应通过：${problem}` : null;
+  };
+  const fail = (label: string, result: AgentResult, checks: Checks = fixture.checks) => {
+    const problem = checkResult(result, checks);
+    return problem ? null : `${label} 不应通过`;
+  };
+  return (
+    pass("写了早上", samplePlan({ time: "下午", detail: "早上出门再去兵马俑。" })) ??
+    pass("写了上午", samplePlan({ time: "上午", detail: quiet })) ??
+    pass("写了清晨", samplePlan({ time: "下午", detail: "清晨再出门，西安城里慢慢走。" })) ??
+    pass("钟点 08:00", samplePlan({ time: "08:00", detail: quiet })) ??
+    pass("钟点 8:00", samplePlan({ time: "8:00", detail: quiet })) ??
+    pass("全角 08:00", samplePlan({ time: "08：00", detail: quiet })) ??
+    pass("09:59", samplePlan({ time: "09:59", detail: quiet })) ??
+    pass("startTime 07:30", samplePlan({ time: "接着", detail: quiet, startTime: "07:30" })) ??
+    fail("10:00 不算早", samplePlan({ time: "10:00", detail: quiet })) ??
+    fail("下午 14:00", samplePlan({ time: "14:00", detail: quiet })) ??
+    fail("正文里的 09:00", samplePlan({ time: "下午", detail: "博物馆 09:00 开门，下午再去西安。" })) ??
+    fail("没有西安", samplePlan({ city: "北京", time: "上午", detail: "上午出门。" })) ??
+    fail("别的用例仍要精确关键词", samplePlan({ time: "上午", detail: quiet, days: 1 }), {
+      minDays: 1,
+      keywords: ["早上"],
+    })
+  );
 }
 
 async function loadFixtures(): Promise<Fixture[]> {
@@ -2352,6 +2513,178 @@ function assertRenamedSource(): string | null {
   if (manualItem?.title !== "华清宫" || !inferredWithoutLink(manualItem)) {
     return `手改标题且没有新来源时应改成推断，得到 ${manualItem?.source.kind} ${manualItem?.source.url ?? ""} ${manualItem?.source.note ?? ""}`;
   }
+  return null;
+}
+
+function assertRetimedSearchLink(): string | null {
+  const now = new Date("2026-11-09T02:00:00.000Z");
+  let n = 0;
+  const random = () => `rt${(n += 1)}`;
+  const draft = buildDraft("下周末两个人从上海去苏州，想看园林。", { id: "retime-link", now, random });
+  const sight = draft.items.find((item) => item.type === "景点" && !item.locked);
+  const meal = draft.items.find((item) => item.type === "餐" && !item.locked && item.source.url == null);
+  const back = draft.items.find((item) => item.title.startsWith("返回") && !item.locked);
+  if (!sight || !meal || !back) return "改时间留链接的用例缺少景点、餐或返程";
+  if (meal.source.kind !== "推断") return `未检索的一餐应是推断，得到 ${meal.source.kind}`;
+
+  const url = "https://example.com/suzhou-garden";
+  const returnUrl = "https://example.com/return-train";
+  const oldFetched = new Date(now.getTime() - 31 * 24 * 60 * 60 * 1000).toISOString();
+  const freshFetched = now.toISOString();
+  const oldNote = "拙政园开放时间";
+  const clock = sight.startTime === "15:40" ? "15:50" : "15:40";
+  const searched: Roadbook = {
+    ...draft,
+    items: draft.items.map((item) => {
+      if (item.id === sight.id) return { ...item, source: { kind: "检索", url, fetchedAt: oldFetched, note: oldNote } };
+      if (item.id === back.id) {
+        return { ...item, source: { kind: "检索", url: returnUrl, fetchedAt: freshFetched, note: "返程车次" } };
+      }
+      return item;
+    }),
+  };
+
+  const kept = (item: RoadbookItem | undefined, link: string, fetchedAt: string): string | null => {
+    if (!item) return "项不见了";
+    if (item.source.kind !== "实测" || item.source.note !== "你改的时间") {
+      return `应标实测和你改的时间，得到 ${item.source.kind} ${item.source.note ?? ""}`;
+    }
+    if (item.source.url !== link || item.source.fetchedAt !== fetchedAt) {
+      return `应留下链接和取数时间，得到 ${item.source.url ?? "无"} ${item.source.fetchedAt ?? "无"}`;
+    }
+    return null;
+  };
+
+  const moved = planItemMove(searched, sight.id, clock);
+  if (!moved.request) return moved.note || "挪时间没有生效";
+  const movedBook = applyPatch(searched, { ...moved.request, id: "p_retime_menu" });
+  if (!movedBook.ok) return movedBook.error;
+  const movedSight = movedBook.book.items.find((item) => item.id === sight.id);
+  const movedProblem = kept(movedSight, url, oldFetched);
+  if (movedProblem) return `挪时间：${movedProblem}`;
+  if (!movedSight || movedSight.title !== sight.title || movedSight.place !== sight.place) return "挪时间不应改标题或地点";
+  const movedMark = factMark(movedSight, now);
+  if (
+    movedMark.kind !== "实测" ||
+    movedMark.note !== "你改的时间" ||
+    movedMark.url !== url ||
+    !movedMark.fetchedOn ||
+    !movedMark.stale ||
+    movedMark.unavailable ||
+    movedMark.needsVerify
+  ) {
+    return `超过 30 天的链接在改时间后仍应可打开并标可能过时，得到 ${movedMark.kind} ${movedMark.note ?? ""} ${movedMark.url ?? "无"} stale=${movedMark.stale}`;
+  }
+  const shared = shareView(movedBook.book).items.find((item) => item.id === sight.id);
+  const sharedMark = shared ? factMark(shared, now) : null;
+  if (!sharedMark || sharedMark.url !== url || !sharedMark.stale || !sharedMark.fetchedOn) {
+    return "分享页应仍能看到留下的链接和可能过时";
+  }
+
+  const spoken = planMessage(searched, `把${sight.title}改到${clock}`, random, now);
+  if (!spoken.request) return spoken.note || "把景点改到没有生效";
+  const spokenBook = applyPatch(searched, { ...spoken.request, id: "p_retime_chat" });
+  if (!spokenBook.ok) return spokenBook.error;
+  const spokenSight = spokenBook.book.items.find((item) => item.id === sight.id);
+  const spokenProblem = kept(spokenSight, url, oldFetched);
+  if (spokenProblem || factMark(spokenSight!, now).url !== url) return `把景点改到：${spokenProblem ?? "页面没有链接"}`;
+
+  const mealClock = meal.startTime === "12:00" ? "12:30" : "12:00";
+  const inferred = planItemMove(draft, meal.id, mealClock);
+  if (!inferred.request) return inferred.note || "推断项挪时间没有生效";
+  const inferredBook = applyPatch(draft, { ...inferred.request, id: "p_retime_inferred" });
+  if (!inferredBook.ok) return inferredBook.error;
+  const inferredMeal = inferredBook.book.items.find((item) => item.id === meal.id);
+  if (
+    !inferredMeal ||
+    inferredMeal.source.kind !== "实测" ||
+    inferredMeal.source.note !== "你改的时间" ||
+    inferredMeal.source.url != null ||
+    inferredMeal.source.fetchedAt != null ||
+    factMark(inferredMeal, now).url
+  ) {
+    return `没有链接的项改时间后仍不应有链接，得到 ${inferredMeal?.source.kind ?? "无"} ${inferredMeal?.source.url ?? ""}`;
+  }
+
+  const retimed = planMessage(searched, "把返程改到16:00", random, now);
+  if (!retimed.request) return retimed.note || "返程改时间没有生效";
+  const returnBook = applyPatch(searched, { ...retimed.request, id: "p_retime_return" });
+  if (!returnBook.ok) return returnBook.error;
+  const returnItem = returnBook.book.items.find((item) => item.id === back.id);
+  const returnProblem = kept(returnItem, returnUrl, freshFetched);
+  if (returnProblem) return `返程：${returnProblem}`;
+  const returnMark = factMark(returnItem!, now);
+  if (returnMark.url !== returnUrl || returnMark.stale || !returnMark.fetchedOn || returnMark.unavailable) {
+    return "刚检索的返程链接改时间后应可打开，且不应标可能过时";
+  }
+
+  const ftp: Roadbook = {
+    ...draft,
+    items: draft.items.map((item) =>
+      item.id === sight.id
+        ? { ...item, source: { kind: "检索", url: "ftp://example.com/garden", fetchedAt: freshFetched, note: oldNote } }
+        : item,
+    ),
+  };
+  const ftpMove = planItemMove(ftp, sight.id, clock);
+  if (!ftpMove.request) return ftpMove.note || "不可用链接的挪时间没有生效";
+  const ftpBook = applyPatch(ftp, { ...ftpMove.request, id: "p_retime_ftp" });
+  if (!ftpBook.ok) return ftpBook.error;
+  const ftpSight = ftpBook.book.items.find((item) => item.id === sight.id);
+  if (
+    ftpSight?.source.kind !== "实测" ||
+    ftpSight.source.note !== "你改的时间" ||
+    ftpSight.source.url != null ||
+    ftpSight.source.fetchedAt != null ||
+    factMark(ftpSight, now).url
+  ) {
+    return `不可用的链接在改时间后应去掉，得到 ${ftpSight?.source.url ?? "无"}`;
+  }
+
+  const renamed = applyPatch(searched, {
+    id: "p_retime_rename",
+    label: "改名并改钟点",
+    kind: "model",
+    ops: [{ op: "update", id: sight.id, fields: { title: "留园", startTime: clock } }],
+  });
+  if (!renamed.ok) return renamed.error;
+  const renamedSight = renamed.book.items.find((item) => item.id === sight.id);
+  if (renamedSight?.title !== "留园" || !inferredWithoutLink(renamedSight)) {
+    return `改标题且没有新来源时应丢掉旧链接，得到 ${renamedSight?.source.kind} ${renamedSight?.source.url ?? ""} ${renamedSight?.source.note ?? ""}`;
+  }
+  const nextPlace = sight.place === "苏州 · 留园" ? "苏州 · 留园外" : "苏州 · 留园";
+  const placed = applyPatch(searched, {
+    id: "p_retime_place",
+    label: "改地点",
+    kind: "user",
+    ops: [{ op: "update", id: sight.id, fields: { place: nextPlace } }],
+  });
+  if (!placed.ok) return placed.error;
+  const placedSight = placed.book.items.find((item) => item.id === sight.id);
+  if (placedSight?.place !== nextPlace || !inferredWithoutLink(placedSight)) {
+    return `改地点且没有新来源时应丢掉旧链接，得到 ${placedSight?.source.kind} ${placedSight?.source.url ?? ""}`;
+  }
+
+  const clockOnly = applyPatch(searched, {
+    id: "p_clock_only_keep",
+    label: "只改钟点",
+    kind: "model",
+    ops: [{ op: "update", id: sight.id, fields: { startTime: clock } }],
+  });
+  if (!clockOnly.ok) return clockOnly.error;
+  const clockItem = clockOnly.book.items.find((item) => item.id === sight.id);
+  if (!searchSourceStill(clockItem, url, oldNote, oldFetched)) {
+    return `只改钟点不应清检索来源，得到 ${clockItem?.source.kind} ${clockItem?.source.url ?? ""} ${clockItem?.source.note ?? ""}`;
+  }
+
+  const lost = normalizeRoadbook({
+    ...draft,
+    items: draft.items.map((item) =>
+      item.id === sight.id ? { ...item, source: { kind: "实测" as const, note: "你改的时间" } } : item,
+    ),
+  });
+  const lostSight = lost.items.find((item) => item.id === sight.id);
+  if (lostSight?.source.url || (lostSight && factMark(lostSight, now).url)) return "已经丢掉的链接不应在读入时补回来";
   return null;
 }
 
@@ -5088,6 +5421,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log("  ok rename without a new source drops the old search link");
+  const retimedLinkError = assertRetimedSearchLink();
+  if (retimedLinkError) {
+    console.error(`retime-link  ${retimedLinkError}`);
+    process.exit(1);
+  }
+  console.log("  ok retiming keeps a search link when the place stays");
   const searchNoteError = assertSearchSourceNote();
   if (searchNoteError) {
     console.error(`search-note  ${searchNoteError}`);
@@ -5187,6 +5526,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log("  ok deepseek omits reasoning effort unless set");
+
+  const morningError = assertXianMorningCheck();
+  if (morningError) {
+    console.error(`xian-morning  ${morningError}`);
+    process.exit(1);
+  }
+  console.log("  ok xi'an morning check accepts 上午 or a clock before 10:00");
 
   const fixtures = await loadFixtures();
   if (fixtures.length < 10) {
