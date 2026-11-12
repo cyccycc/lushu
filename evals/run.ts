@@ -2172,6 +2172,267 @@ function assertSpanBriefs(): string | null {
   return null;
 }
 
+function searchSourceStill(item: RoadbookItem | undefined, url: string, note: string, fetchedAt: string): boolean {
+  return Boolean(
+    item &&
+      item.source.kind === "检索" &&
+      item.source.url === url &&
+      item.source.fetchedAt === fetchedAt &&
+      item.source.note === note,
+  );
+}
+
+function inferredWithoutLink(item: RoadbookItem | undefined): boolean {
+  if (!item || item.source.kind !== "推断") return false;
+  return item.source.url == null && item.source.fetchedAt == null && item.source.note == null;
+}
+
+/** Changing the title or place without a new source must not keep the old search link. */
+function assertRenamedSource(): string | null {
+  const now = new Date("2026-11-01T02:00:00.000Z");
+  let n = 0;
+  const random = () => `rs${(n += 1)}`;
+  const draft = buildDraft("从上海去西安玩7天", { id: "rename-source", now, random });
+  const host = draft.items.find((item) => item.type === "景点" && item.title.includes("兵马俑"));
+  if (!host) return "改名来源用例缺少兵马俑";
+  const oldUrl = "https://www.facebook.com/watch/?v=terracotta";
+  const oldNote = "19K views · 1K reactions | 兵马俑自由行";
+  const fetchedAt = "2026-11-01T00:00:00.000Z";
+  const book: Roadbook = {
+    ...draft,
+    items: draft.items.map((item) =>
+      item.id === host.id
+        ? { ...item, locked: false, source: { kind: "检索", url: oldUrl, fetchedAt, note: oldNote } }
+        : item,
+    ),
+  };
+  const renamed = applyPatch(book, {
+    id: "p_rename_model",
+    label: "换成华清宫",
+    kind: "model",
+    ops: [
+      {
+        op: "update",
+        id: host.id,
+        fields: { title: "华清宫", place: "西安 · 临潼", note: "请出发前核实" },
+      },
+    ],
+  });
+  if (!renamed.ok) return renamed.error;
+  const next = renamed.book.items.find((item) => item.id === host.id);
+  if (!next || next.title !== "华清宫" || next.place !== "西安 · 临潼" || next.note !== "请出发前核实") {
+    return `模型改名应改标题、地点和备注，得到 ${next?.title ?? "无"} ${next?.place ?? ""} ${next?.note ?? ""}`;
+  }
+  if (!inferredWithoutLink(next) || `${next.source.url ?? ""}${next.source.note ?? ""}`.includes(oldUrl)) {
+    return `改名且没有新来源时应改成推断并丢掉旧链接，得到 ${next.source.kind} ${next.source.url ?? ""} ${next.source.note ?? ""}`;
+  }
+  if ((next.source.note ?? "").includes(oldNote) || (next.source.note ?? "").includes("facebook")) {
+    return `旧检索说明不应留下：${next.source.note ?? ""}`;
+  }
+
+  const kept = applyPatch(book, {
+    id: "p_rename_cited",
+    label: "换成华清宫并检索",
+    kind: "model",
+    ops: [
+      {
+        op: "update",
+        id: host.id,
+        fields: {
+          title: "华清宫",
+          source: {
+            kind: "检索",
+            url: "https://example.com/huaqing",
+            fetchedAt: "2026-11-02T00:00:00.000Z",
+            note: "华清宫开放时间",
+          },
+        },
+      },
+    ],
+  });
+  if (!kept.ok) return kept.error;
+  const cited = kept.book.items.find((item) => item.id === host.id);
+  if (
+    cited?.title !== "华清宫" ||
+    !searchSourceStill(cited, "https://example.com/huaqing", "华清宫开放时间", "2026-11-02T00:00:00.000Z")
+  ) {
+    return `补丁自带的检索应保留，得到 ${cited?.source.kind} ${cited?.source.url ?? ""} ${cited?.source.note ?? ""}`;
+  }
+
+  const same = applyPatch(book, {
+    id: "p_same_title",
+    label: "同名",
+    kind: "model",
+    ops: [{ op: "update", id: host.id, fields: { title: `  ${host.title}  ` } }],
+  });
+  if (!same.ok) return same.error;
+  const sameItem = same.book.items.find((item) => item.id === host.id);
+  if (sameItem?.title !== host.title || !searchSourceStill(sameItem, oldUrl, oldNote, fetchedAt)) {
+    return `标题去掉空白后没变，不应清来源，得到 ${sameItem?.title} ${sameItem?.source.kind} ${sameItem?.source.url ?? ""}`;
+  }
+
+  const clock = formatTime(Math.min((parseTime(host.startTime) ?? 9 * 60) + 5, 20 * 60));
+  const retimed = applyPatch(book, {
+    id: "p_clock_only",
+    label: "只改时间",
+    kind: "model",
+    ops: [{ op: "update", id: host.id, fields: { startTime: clock } }],
+  });
+  if (!retimed.ok) return retimed.error;
+  const retimedItem = retimed.book.items.find((item) => item.id === host.id);
+  if (!searchSourceStill(retimedItem, oldUrl, oldNote, fetchedAt)) {
+    return `只改钟点不应清来源，得到 ${retimedItem?.source.kind} ${retimedItem?.source.url ?? ""}`;
+  }
+
+  const shorter = host.durationMinutes > 30 ? host.durationMinutes - 10 : host.durationMinutes + 10;
+  const duration = applyPatch(book, {
+    id: "p_duration",
+    label: "只改时长",
+    kind: "model",
+    ops: [{ op: "update", id: host.id, fields: { durationMinutes: shorter } }],
+  });
+  if (!duration.ok) return duration.error;
+  if (!searchSourceStill(duration.book.items.find((item) => item.id === host.id), oldUrl, oldNote, fetchedAt)) {
+    return "只改时长不应清来源";
+  }
+
+  const noted = applyPatch(book, {
+    id: "p_note_only",
+    label: "只改备注",
+    kind: "model",
+    ops: [{ op: "update", id: host.id, fields: { note: "只改备注" } }],
+  });
+  if (!noted.ok) return noted.error;
+  const notedItem = noted.book.items.find((item) => item.id === host.id);
+  if (notedItem?.note !== "只改备注" || !searchSourceStill(notedItem, oldUrl, oldNote, fetchedAt)) {
+    return "只改备注不应清来源";
+  }
+
+  const locked = applyPatch(book, {
+    id: "p_lock_source",
+    label: "只锁定",
+    kind: "user",
+    ops: [{ op: "update", id: host.id, fields: { locked: true } }],
+  });
+  if (!locked.ok) return locked.error;
+  const lockedItem = locked.book.items.find((item) => item.id === host.id);
+  if (!lockedItem?.locked || !searchSourceStill(lockedItem, oldUrl, oldNote, fetchedAt)) return "锁定不应清来源";
+
+  const done = applyPatch(book, {
+    id: "p_status_source",
+    label: "只改状态",
+    kind: "user",
+    ops: [{ op: "update", id: host.id, fields: { status: "已完成" } }],
+  });
+  if (!done.ok) return done.error;
+  const doneItem = done.book.items.find((item) => item.id === host.id);
+  if (doneItem?.status !== "已完成" || !searchSourceStill(doneItem, oldUrl, oldNote, fetchedAt)) return "改状态不应清来源";
+
+  const place = host.place.includes("华清") ? "西安 · 临潼" : "西安 · 华清宫";
+  const movedPlace = applyPatch(book, {
+    id: "p_place_only",
+    label: "只改地点",
+    kind: "model",
+    ops: [{ op: "update", id: host.id, fields: { place } }],
+  });
+  if (!movedPlace.ok) return movedPlace.error;
+  const placed = movedPlace.book.items.find((item) => item.id === host.id);
+  if (placed?.title !== host.title || placed.place !== place || !inferredWithoutLink(placed)) {
+    return `只改地点且没有新来源时应改成推断，得到 ${placed?.place} ${placed?.source.kind} ${placed?.source.url ?? ""}`;
+  }
+
+  const manual = applyPatch(book, {
+    id: "p_rename_user",
+    label: "手改华清宫",
+    kind: "user",
+    ops: [{ op: "update", id: host.id, fields: { title: "华清宫", place: "西安 · 临潼" } }],
+  });
+  if (!manual.ok) return manual.error;
+  const manualItem = manual.book.items.find((item) => item.id === host.id);
+  if (manualItem?.title !== "华清宫" || !inferredWithoutLink(manualItem)) {
+    return `手改标题且没有新来源时应改成推断，得到 ${manualItem?.source.kind} ${manualItem?.source.url ?? ""} ${manualItem?.source.note ?? ""}`;
+  }
+  return null;
+}
+
+function assertSearchSourceNote(): string | null {
+  const now = new Date("2026-11-09T02:00:00.000Z");
+  let n = 0;
+  const random = () => `sn${(n += 1)}`;
+  const west = buildDraft("今天去西湖两天，两个人", { id: "cite-note", now, random });
+  const lake = west.items.find((item) => item.title === "西湖");
+  if (!lake || lake.source.kind !== "推断") return "西湖应先是推断，才能挂检索";
+  const short = citeRetrievedSights(
+    west.items,
+    { title: "西湖开放时间与门票", url: "https://example.com/xihu" },
+    now.toISOString(),
+  );
+  const shortLake = short.find((item) => item.id === lake.id);
+  if (shortLake?.source.kind !== "检索" || shortLake.source.note !== "西湖开放时间与门票" || !shortLake.source.url) {
+    return `短标题应原样留下，得到 ${shortLake?.source.note ?? "无"}`;
+  }
+  const page = "【🇨🇳西安— 西湖自由行】这是一段很长的帖子标题用来确认会裁到四十个字符以内不要保留浏览量";
+  if (page.length <= 40) return `用例页标题应超过 40 字，得到 ${page.length}`;
+  const facebook = citeRetrievedSights(
+    west.items,
+    { title: `19K views · 1K reactions | ${page}`, url: "https://example.com/fb-xihu" },
+    now.toISOString(),
+  );
+  const fbLake = facebook.find((item) => item.id === lake.id);
+  const note = fbLake?.source.note ?? "";
+  if (fbLake?.source.kind !== "检索" || fbLake.source.url !== "https://example.com/fb-xihu" || !fbLake.source.fetchedAt) {
+    return "社交标题仍应标成检索并留下链接";
+  }
+  if (note.length > 40 || note !== page.slice(0, 40)) return `来源说明应是不超过 40 字的页标题，得到 ${note.length}：${note}`;
+  if (/^\s*\d/.test(note) || /views|reactions/i.test(note) || note.includes("19K")) {
+    return `来源说明不应以浏览量开头：${note}`;
+  }
+  const longTitle = `西湖开放时间与门票${"补充说明".repeat(8)}`;
+  const long = citeRetrievedSights(west.items, { title: longTitle, url: "https://example.com/long" }, now.toISOString());
+  const longNote = long.find((item) => item.id === lake.id)?.source.note ?? "";
+  if (longNote.length !== 40 || longNote !== longTitle.slice(0, 40)) {
+    return `没有社交前缀的长标题也应裁到 40 字，得到 ${longNote.length}：${longNote}`;
+  }
+  const savedNote = "19K views · 1K reactions | 已经存下来的旧说明不应该被改写";
+  const saved = citeRetrievedSights(
+    west.items.map((item) =>
+      item.id === lake.id
+        ? {
+            ...item,
+            source: { kind: "检索" as const, url: "https://example.com/old", fetchedAt: now.toISOString(), note: savedNote },
+          }
+        : item,
+    ),
+    { title: `19K views · 1K reactions | ${page}`, url: "https://example.com/new" },
+    now.toISOString(),
+  );
+  const kept = saved.find((item) => item.id === lake.id);
+  if (kept?.source.note !== savedNote || kept.source.url !== "https://example.com/old") return "已经保存的检索说明不应重写";
+  return null;
+}
+
+function assertReasoningEffort(): string | null {
+  const deepseekModel = readLlmEnv({ LLM_MODEL: "deepseek-chat" });
+  if (deepseekModel.reasoningEffort !== null) {
+    return `DeepSeek 模型未设置时应省略 reasoning_effort，得到 ${String(deepseekModel.reasoningEffort)}`;
+  }
+  const deepseekUrl = readLlmEnv({ LLM_BASE_URL: "https://api.DeepSeek.com/v1" });
+  if (deepseekUrl.reasoningEffort !== null) {
+    return `DeepSeek 地址未设置时应省略 reasoning_effort，得到 ${String(deepseekUrl.reasoningEffort)}`;
+  }
+  const explicit = readLlmEnv({ LLM_MODEL: "deepseek-chat", LLM_REASONING_EFFORT: "low" });
+  if (explicit.reasoningEffort !== "low") return `DeepSeek 显式 low 应保留，得到 ${String(explicit.reasoningEffort)}`;
+  const grok = readLlmEnv({});
+  if (grok.model !== "grok-4.7" || grok.reasoningEffort !== "low") {
+    return `Grok 未设置时应是 low，得到 ${grok.model} ${String(grok.reasoningEffort)}`;
+  }
+  const empty = readLlmEnv({ LLM_REASONING_EFFORT: "" });
+  if (empty.reasoningEffort !== null) return `空字符串应省略，得到 ${String(empty.reasoningEffort)}`;
+  const blank = readLlmEnv({ LLM_MODEL: "DeepSeek-V3", LLM_REASONING_EFFORT: "   " });
+  if (blank.reasoningEffort !== null) return `空白字符串应省略，得到 ${String(blank.reasoningEffort)}`;
+  return null;
+}
+
 function assertLlmBase(): string | null {
   const fallback = "https://api.deepseek.com/v1";
   const rejected = [
@@ -4821,6 +5082,18 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log("  ok flat and wrapped model patches, claim refusal, empty lock");
+  const renamedSourceError = assertRenamedSource();
+  if (renamedSourceError) {
+    console.error(`rename-source  ${renamedSourceError}`);
+    process.exit(1);
+  }
+  console.log("  ok rename without a new source drops the old search link");
+  const searchNoteError = assertSearchSourceNote();
+  if (searchNoteError) {
+    console.error(`search-note  ${searchNoteError}`);
+    process.exit(1);
+  }
+  console.log("  ok search source notes are page titles");
   const styleNoteError = assertStyleNotesAndLocks();
   if (styleNoteError) {
     console.error(`style-note  ${styleNoteError}`);
@@ -4908,6 +5181,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log("  ok roadbook patch, undo, late, rain, tired");
+  const effortError = assertReasoningEffort();
+  if (effortError) {
+    console.error(`reasoning  ${effortError}`);
+    process.exit(1);
+  }
+  console.log("  ok deepseek omits reasoning effort unless set");
 
   const fixtures = await loadFixtures();
   if (fixtures.length < 10) {

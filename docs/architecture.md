@@ -40,4 +40,4 @@ JSON files in `data/sessions/` (gitignored). The id is the share link. 我的路
 
 ## Swapping the model
 
-Any OpenAI-compatible `POST /chat/completions` endpoint works. Change `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY`. The client retries once without `response_format` and `reasoning_effort` if the provider rejects them.
+Any OpenAI-compatible `POST /chat/completions` endpoint works. Change `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY`. The client retries once without `response_format` and `reasoning_effort` if the provider rejects them. When `LLM_REASONING_EFFORT` is unset, DeepSeek (the model or base URL contains `deepseek`) omits `reasoning_effort`; `low` can make DeepSeek return empty patches. Other providers still default to `low`. An explicit nonempty value is sent as written.

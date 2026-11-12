@@ -356,6 +356,8 @@ function rewritePlacedNote(item: RoadbookItem): string | undefined {
 }
 
 function applyFields(item: RoadbookItem, fields: ItemFields): string | null {
+  const titleBefore = item.title.trim();
+  const placeBefore = item.place.trim();
   if (fields.dayIndex != null) {
     if (!Number.isInteger(fields.dayIndex) || fields.dayIndex < 1 || fields.dayIndex > 14) return "日序无效。";
     item.dayIndex = fields.dayIndex;
@@ -431,6 +433,10 @@ function applyFields(item: RoadbookItem, fields: ItemFields): string | null {
   if (timingChanged && fields.note == null) {
     const next = rewritePlacedNote(item);
     if (next !== item.note) item.note = next;
+  }
+  // A new title or place is a different page. Without a source on this op, the old link would be a lie.
+  if ((item.title.trim() !== titleBefore || item.place.trim() !== placeBefore) && fields.source == null) {
+    item.source = { kind: "推断" };
   }
   return null;
 }

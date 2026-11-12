@@ -44,6 +44,17 @@ function isTemplateSight(item: Pick<RoadbookItem, "title" | "note" | "source">):
   return /通用模板|地点是推断/.test(`${item.note ?? ""} ${item.source.note ?? ""}`);
 }
 
+const SOCIAL_STAT =
+  String.raw`\d+(?:[.,]\d+)?\s*[kKmM万千]?\s*(?:views?|reactions?|likes?|comments?|shares?|次观看|次播放|次浏览|次反应|个赞|条评论|条反应|点赞|观看|播放)`;
+/** Leading view/reaction counts, then a pipe or a similar separator. */
+const SOCIAL_PREFIX = new RegExp(String.raw`^(?:${SOCIAL_STAT}\s*[·•・⋅|,，、/｜:：–—-]\s*)+`, "iu");
+
+/** Page title only. Social blurbs such as "19K views · 1K reactions | …" are not a title. */
+function searchSourceNote(title: string): string {
+  const page = title.replace(SOCIAL_PREFIX, "").trim();
+  return (page || title.trim()).slice(0, 40);
+}
+
 /** Attach a search hit only when it actually names a non-template sight. */
 export function citeRetrievedSights(
   items: RoadbookItem[],
@@ -53,6 +64,7 @@ export function citeRetrievedSights(
   const title = hit?.title?.trim() ?? "";
   const url = hit?.url ?? "";
   if (!title || !/^https?:\/\//.test(url)) return items;
+  const note = searchSourceNote(title);
   return items.map((item) => {
     if (item.type !== "景点" || item.source.kind !== "推断") return item;
     if (isTemplateSight(item) || !title.includes(item.title)) return item;
@@ -62,7 +74,7 @@ export function citeRetrievedSights(
         kind: "检索",
         url,
         fetchedAt,
-        note: title.slice(0, 200),
+        note,
       },
     };
   });
