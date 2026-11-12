@@ -590,30 +590,68 @@ export function projectPatch(
   return { ok: true, items };
 }
 
+const ITEM_FIELD_KEYS = [
+  "dayIndex",
+  "startTime",
+  "durationMinutes",
+  "title",
+  "place",
+  "lat",
+  "lng",
+  "type",
+  "status",
+  "source",
+  "travelEstimateMinutes",
+  "estimateSource",
+  "locked",
+  "priority",
+  "indoor",
+  "note",
+] as const satisfies readonly (keyof ItemFields)[];
+
+const itemFieldKeysCovered: Exclude<keyof ItemFields, (typeof ITEM_FIELD_KEYS)[number]> extends never ? true : never = true;
+void itemFieldKeysCovered;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Item fields only. `locked` is dropped so a model patch cannot lock or unlock. */
+function pickItemFields(source: Record<string, unknown>): ItemFields {
+  const fields: Record<string, unknown> = {};
+  for (const key of ITEM_FIELD_KEYS) {
+    if (key === "locked" || !Object.prototype.hasOwnProperty.call(source, key)) continue;
+    fields[key] = source[key];
+  }
+  return fields as ItemFields;
+}
+
+function hasItemField(source: Record<string, unknown>): boolean {
+  return ITEM_FIELD_KEYS.some((key) => Object.prototype.hasOwnProperty.call(source, key));
+}
+
 export function opsFromUnknown(raw: unknown): { ops: PatchOp[] } | { error: string } {
   if (!raw || typeof raw !== "object" || !Array.isArray((raw as { ops?: unknown }).ops)) {
     return { error: "模型没有返回补丁。" };
   }
   const ops: PatchOp[] = [];
   for (const entry of (raw as { ops: unknown[] }).ops.slice(0, 8)) {
-    if (!entry || typeof entry !== "object") return { error: "补丁无法解析。" };
-    const record = entry as {
-      op?: string;
-      id?: string;
-      fields?: ItemFields;
-      item?: unknown;
-      dayIndex?: number;
-      ids?: unknown[];
-    };
+    if (!isPlainObject(entry)) return { error: "补丁无法解析。" };
+    const record = entry;
     if (record.op === "remove" && typeof record.id === "string") {
       ops.push({ op: "remove", id: record.id });
       continue;
     }
-    if (record.op === "update" && typeof record.id === "string" && record.fields && typeof record.fields === "object") {
-      const fields: ItemFields = { ...record.fields };
-      delete fields.locked;
-      ops.push({ op: "update", id: record.id, fields });
-      continue;
+    if (record.op === "update" && typeof record.id === "string") {
+      // Wrapped {op,id,fields} stays valid. A flat update puts those same fields beside op and id.
+      if (isPlainObject(record.fields)) {
+        ops.push({ op: "update", id: record.id, fields: pickItemFields(record.fields) });
+        continue;
+      }
+      if (hasItemField(record)) {
+        ops.push({ op: "update", id: record.id, fields: pickItemFields(record) });
+        continue;
+      }
     }
     if (record.op === "add") {
       const normalized = normalizeItem(record.item);

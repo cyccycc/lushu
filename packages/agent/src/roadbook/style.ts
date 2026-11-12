@@ -44,6 +44,15 @@ function guidePlace(city: string, title: string): Place | undefined {
   return guideFor(city).places.find((place) => place.name === title || title.includes(place.name));
 }
 
+/** Titles on the snapshot being restyled, plus locked titles on the live book (those items stay). */
+function titlesInUse(items: RoadbookItem[], book: Roadbook): Set<string> {
+  const used = new Set(items.map((item) => item.title));
+  for (const item of book.items) {
+    if (item.locked) used.add(item.title);
+  }
+  return used;
+}
+
 function unusedFreePlace(book: Roadbook, used: Set<string>): Place | undefined {
   return guideFor(book.city).places.find((place) => {
     if (used.has(place.name)) return false;
@@ -64,6 +73,12 @@ function appendStyleNote(current: string | undefined, extra: string): string {
   return `${base}${/[。！？]$/.test(base) ? "" : "。"}${extra}`;
 }
 
+/** Same title: keep the old note and append. New title: the style sentence replaces the old note. */
+function noteForStyle(current: string | undefined, sentence: string, previousTitle: string, nextTitle: string): string {
+  if (previousTitle !== nextTitle) return sentence;
+  return appendStyleNote(current, sentence);
+}
+
 function relax(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookItem[] {
   return items.flatMap((item) => {
     if (!inScope(book, item, now)) return [item];
@@ -74,7 +89,7 @@ function relax(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookItem[]
         ...item,
         durationMinutes: 75,
         travelEstimateMinutes: item.travelEstimateMinutes == null ? null : Math.min(item.travelEstimateMinutes, 15),
-        note: appendStyleNote(item.note, "更轻松。少排一点，缩短停留。"),
+        note: noteForStyle(item.note, "更轻松。少排一点，缩短停留。", item.title, item.title),
         source: { kind: "推断" as const, note: "更轻松" },
       },
     ];
@@ -82,7 +97,7 @@ function relax(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookItem[]
 }
 
 function saveMoney(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookItem[] {
-  const used = new Set(items.map((item) => item.title));
+  const used = titlesInUse(items, book);
   return items.map((item) => {
     if (!inScope(book, item, now) || item.type !== "景点") return item;
     const known = guidePlace(book.city, item.title);
@@ -93,7 +108,7 @@ function saveMoney(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookIt
       return {
         ...item,
         travelEstimateMinutes: item.travelEstimateMinutes == null ? 15 : Math.min(item.travelEstimateMinutes, 20),
-        note: appendStyleNote(item.note, `更省钱。${item.title}先留着。去的时候改坐公交，不打车。`),
+        note: noteForStyle(item.note, `更省钱。${item.title}先留着。去的时候改坐公交，不打车。`, item.title, item.title),
         source: { kind: "推断" as const, note: "更省钱" },
       };
     }
@@ -103,14 +118,14 @@ function saveMoney(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookIt
       title: next.name,
       place: `${book.city} · ${next.area}`,
       indoor: next.indoor,
-      note: appendStyleNote(item.note, cheapNote(item.title)),
+      note: noteForStyle(item.note, cheapNote(item.title), item.title, next.name),
       source: { kind: "推断" as const, note: "更省钱" },
     };
   });
 }
 
 function rainy(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookItem[] {
-  const used = new Set(items.map((item) => item.title));
+  const used = titlesInUse(items, book);
   const indoor = guideFor(book.city).places.filter((place) => place.indoor);
   return items.map((item) => {
     if (!inScope(book, item, now) || item.type !== "景点" || item.indoor) return item;
@@ -123,13 +138,13 @@ function rainy(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookItem[]
         place: `${book.city} · ${alt.area}`,
         indoor: true,
         durationMinutes: Math.min(item.durationMinutes, 90),
-        note: appendStyleNote(item.note, `雨天版。原来是「${item.title}」。${alt.detail}`),
+        note: noteForStyle(item.note, `雨天版。原来是「${item.title}」。${alt.detail}`, item.title, alt.name),
         source: { kind: "推断" as const, note: "雨天版" },
       };
     }
     return {
       ...item,
-      note: appendStyleNote(item.note, `雨天版。${item.title}仍留在户外，去之前再看一眼。`),
+      note: noteForStyle(item.note, `雨天版。${item.title}仍留在户外，去之前再看一眼。`, item.title, item.title),
       source: { kind: "推断" as const, note: "雨天版" },
     };
   });
@@ -147,7 +162,7 @@ function lessWalking(items: RoadbookItem[], book: Roadbook, now: Date): Roadbook
         ...item,
         durationMinutes: longSight ? Math.min(item.durationMinutes, 60) : item.durationMinutes,
         travelEstimateMinutes: item.travelEstimateMinutes == null ? null : Math.min(item.travelEstimateMinutes, 15),
-        note: appendStyleNote(item.note, "少走路。缩短停留，少走一段。"),
+        note: noteForStyle(item.note, "少走路。缩短停留，少走一段。", item.title, item.title),
         source: { kind: "推断" as const, note: "少走路" },
       },
     ];

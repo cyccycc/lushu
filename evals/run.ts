@@ -37,6 +37,7 @@ import {
   formatTime,
   normalizeRoadbook,
   normalizeWeatherQuery,
+  opsFromUnknown,
   parseTime,
   normalizeRoadbookUndo,
   planAssumptionEdit,
@@ -67,7 +68,15 @@ import {
   type Roadbook,
   type RoadbookItem,
 } from "@lushu/agent/roadbook";
-import { extractBrief, parseExtract, validateExtract, type TripExtract } from "@lushu/agent/roadbook-server";
+import {
+  extractBrief,
+  modelPatchExamples,
+  modelPatchSystem,
+  parseExtract,
+  proposeModelPatch,
+  validateExtract,
+  type TripExtract,
+} from "@lushu/agent/roadbook-server";
 
 config({ path: path.resolve(process.cwd(), ".env") });
 
@@ -4190,6 +4199,281 @@ function assertWaveFixes(): string | null {
   return null;
 }
 
+function lunchOn(book: Roadbook, day: number): RoadbookItem | undefined {
+  return book.items.find((item) => {
+    if (item.type !== "餐" || item.dayIndex !== day) return false;
+    const start = parseTime(item.startTime) ?? -1;
+    return start >= 11 * 60 && start < 16 * 60;
+  });
+}
+
+function assertModelPatchParse(): string | null {
+  for (const op of ["add", "update", "remove", "reorder"] as const) {
+    if (!modelPatchSystem.includes(`"op":"${op}"`)) return `系统提示缺少 ${op} 的 JSON 示例`;
+  }
+  if (!modelPatchSystem.includes('"fields":{"title":"华清宫"')) return "update 示例应把标题放进 fields";
+  const examples = opsFromUnknown({
+    ops: [modelPatchExamples.add, modelPatchExamples.update, modelPatchExamples.remove, modelPatchExamples.reorder],
+  });
+  if ("error" in examples) return `提示里的四种补丁应能解析：${examples.error}`;
+  const wrappedExample = examples.ops.find((op) => op.op === "update");
+  if (!wrappedExample || wrappedExample.op !== "update" || wrappedExample.fields.title !== "华清宫" || "locked" in wrappedExample.fields) {
+    return "update 示例应解析成带 fields 的补丁，并且不带 locked";
+  }
+
+  const now = new Date("2026-11-01T02:00:00.000Z");
+  let n = 0;
+  const random = () => `mp${(n += 1)}`;
+  const book = buildDraft("杭州玩2天", { id: "patch-shape", now, random });
+  const sight = book.items.find((item) => item.type === "景点" && !item.locked);
+  if (!sight) return "模型补丁用例缺少未锁定景点";
+  const flat = opsFromUnknown({
+    ops: [
+      {
+        op: "update",
+        id: sight.id,
+        title: "华清宫",
+        place: "西安 · 临潼",
+        note: "平铺的备注",
+        locked: true,
+        highlight: true,
+        extra: "不要",
+      },
+    ],
+  });
+  if ("error" in flat) return `平铺 update 应能解析：${flat.error}`;
+  const flatOp = flat.ops[0];
+  if (!flatOp || flatOp.op !== "update") return "平铺结果应是 update";
+  if ("locked" in flatOp.fields || "highlight" in flatOp.fields || "extra" in flatOp.fields || "op" in flatOp.fields) {
+    return `平铺只应留下行程字段：${Object.keys(flatOp.fields).join(",")}`;
+  }
+  if (flatOp.fields.title !== "华清宫" || flatOp.fields.note !== "平铺的备注" || flatOp.fields.place !== "西安 · 临潼") {
+    return "平铺的标题、地点和备注应留下";
+  }
+  const applied = applyPatch(book, { id: "p_flat", label: "平铺", kind: "model", ops: flat.ops });
+  if (!applied.ok) return applied.error;
+  const flatItem = applied.book.items.find((item) => item.id === sight.id);
+  if (!flatItem || flatItem.title !== "华清宫" || flatItem.locked || flatItem.note !== "平铺的备注") {
+    return `平铺应改标题并忽略 locked，得到 ${flatItem?.title ?? "无"} locked=${flatItem?.locked} ${flatItem?.note ?? ""}`;
+  }
+
+  const wrapped = opsFromUnknown({
+    ops: [{ op: "update", id: sight.id, fields: { title: "华清池", note: "包在 fields 里", locked: true, extra: "不要" } }],
+  });
+  if ("error" in wrapped) return `包在 fields 里的 update 应能解析：${wrapped.error}`;
+  const wrappedOp = wrapped.ops[0];
+  if (!wrappedOp || wrappedOp.op !== "update" || "locked" in wrappedOp.fields || "extra" in wrappedOp.fields) {
+    return "fields 里的 locked 和多余字段应丢掉";
+  }
+  if (wrappedOp.fields.title !== "华清池" || wrappedOp.fields.note !== "包在 fields 里") return "fields 里的标题和备注应留下";
+  const wrappedBook = applyPatch(book, { id: "p_wrapped", label: "包一层", kind: "model", ops: wrapped.ops });
+  if (!wrappedBook.ok) return wrappedBook.error;
+  const wrappedItem = wrappedBook.book.items.find((item) => item.id === sight.id);
+  if (!wrappedItem || wrappedItem.title !== "华清池" || wrappedItem.locked || wrappedItem.note !== "包在 fields 里") {
+    return `包一层的 update 应改标题并保持未锁定，得到 ${wrappedItem?.title ?? "无"} locked=${wrappedItem?.locked}`;
+  }
+
+  const empty = opsFromUnknown({ ops: [{ op: "update", id: sight.id }] });
+  if (!("error" in empty) || empty.error !== "有一条补丁无法解析。") {
+    return `没有字段的 update 应无法解析，得到 ${"error" in empty ? empty.error : "成功"}`;
+  }
+  return null;
+}
+
+function assertStyleNotesAndLocks(): string | null {
+  const now = new Date("2026-11-01T02:00:00.000Z");
+  let n = 0;
+  const random = () => `sn${(n += 1)}`;
+  const book = buildDraft("杭州玩2天", { id: "style-note", now, random });
+  const lake = book.items.find((item) => item.title === "西湖");
+  const temple = book.items.find((item) => item.title === "灵隐寺");
+  const street = book.items.find((item) => item.title === "河坊街");
+  if (!lake || !temple || !street) return "杭州两天应有西湖、灵隐寺和河坊街";
+  const handwritten = "手写的西湖备注";
+  const prepared: Roadbook = {
+    ...book,
+    items: book.items.map((item) => (item.id === lake.id ? { ...item, note: handwritten } : item)),
+  };
+  const rainy = applyRoadbookStyle(prepared, "雨天版", false, now);
+  if (!rainy.ok) return rainy.confirm ? rainy.note : rainy.error;
+  const museum = rainy.book.items.find((item) => item.id === lake.id);
+  const rainyNote = "雨天版。原来是「西湖」。室内。西湖下雨或想歇脚时优先来这里。闭馆日请核实。";
+  if (museum?.title !== "浙江省博物馆" || museum.note !== rainyNote || museum.note.includes(handwritten) || museum.note.includes("沿白堤")) {
+    return `西湖换成博物馆后应只留雨天句子，得到 ${museum?.title ?? "无"} ${museum?.note ?? ""}`;
+  }
+  const templeAfter = rainy.book.items.find((item) => item.id === temple.id);
+  if (!templeAfter || templeAfter.title === temple.title || templeAfter.note?.includes("门票") || !templeAfter.note?.startsWith("雨天版。原来是「灵隐寺」")) {
+    return `灵隐寺换标题后不应留下旧备注，得到 ${templeAfter?.title ?? "无"} ${templeAfter?.note ?? ""}`;
+  }
+  const streetAfter = rainy.book.items.find((item) => item.id === street.id);
+  if (streetAfter?.title !== street.title || !streetAfter.note?.includes("看一条街就离开") || !streetAfter.note.includes("雨天版。河坊街仍留在户外")) {
+    return `标题不变的河坊街应在原备注后接雨天句子，得到 ${streetAfter?.title ?? "无"} ${streetAfter?.note ?? ""}`;
+  }
+  const must: Roadbook = {
+    ...book,
+    items: book.items.map((item) => (item.id === lake.id ? { ...item, priority: "必去" } : item)),
+  };
+  const rainyMust = applyRoadbookStyle(must, "雨天版", false, now);
+  if (!rainyMust.ok) return rainyMust.confirm ? rainyMust.note : rainyMust.error;
+  const keptLake = rainyMust.book.items.find((item) => item.id === lake.id);
+  if (keptLake?.title !== "西湖" || !keptLake.note?.includes("沿白堤") || !keptLake.note.includes("雨天版。西湖仍留在户外")) {
+    return `必去的西湖应留在原地并接上雨天句子，得到 ${keptLake?.title ?? "无"} ${keptLake?.note ?? ""}`;
+  }
+
+  const cheap = applyRoadbookStyle(book, "更省钱", false, now);
+  if (!cheap.ok) return cheap.confirm ? cheap.note : cheap.error;
+  const cheapTemple = cheap.book.items.find((item) => item.id === temple.id);
+  const cheapNote = "更省钱。原来是「灵隐寺」。改去不收门票的地方，这段也可以改坐公交，不打车。";
+  if (cheapTemple?.title === "灵隐寺" || cheapTemple?.note !== cheapNote || cheapTemple.note.includes("出发前核实")) {
+    return `更省钱换成别的景点后应只留省钱句子，得到 ${cheapTemple?.title ?? "无"} ${cheapTemple?.note ?? ""}`;
+  }
+
+  const lock = planLockMust(rainy.book, museum.id);
+  if (!lock.request) return lock.note;
+  const locked = applyPatch(rainy.book, { ...lock.request, id: "p_lock_museum" });
+  if (!locked.ok) return locked.error;
+  const ask = applyRoadbookStyle(locked.book, "更省钱", false, now);
+  if (ask.ok || !ask.confirm) return "锁定后再换风格应先确认";
+  const again = applyRoadbookStyle(locked.book, "更省钱", true, now);
+  if (!again.ok) return again.confirm ? again.note : again.error;
+  const museumCount = again.book.items.filter((item) => item.title === "浙江省博物馆").length;
+  if (museumCount !== 1) return `锁定的浙江省博物馆不应再被排进去，出现了 ${museumCount} 次`;
+  const still = again.book.items.find((item) => item.id === museum.id);
+  if (!still?.locked || still.title !== "浙江省博物馆" || !still.note?.startsWith("雨天版")) {
+    return `锁定的博物馆应保持雨天版，得到 ${still?.title ?? "无"} locked=${still?.locked} ${still?.note ?? ""}`;
+  }
+  const sightTitles = again.book.items.filter((item) => item.type === "景点").map((item) => item.title);
+  const duplicated = sightTitles.filter((title, index) => sightTitles.indexOf(title) !== index);
+  if (duplicated.length > 0) return `换到更省钱后景点重复了：${duplicated.join("、")}`;
+  return null;
+}
+
+function assertMealToday(): string | null {
+  const builtNow = new Date("2026-11-01T02:00:00.000Z");
+  let n = 0;
+  const random = () => `md${(n += 1)}`;
+  const built = buildDraft("从上海去北京玩2天", { id: "meal-day", now: builtNow, random });
+  const day1 = lunchOn(built, 1);
+  const day2 = lunchOn(built, 2);
+  if (!day1 || !day2 || day1.id === day2.id) return "北京两天应有两顿午饭";
+  const before = planMessage(built, "把午饭改到 13:00", random, builtNow);
+  if (!before.request) return before.note || "出发前应能改午饭";
+  const beforeId = before.request.ops.find((op) => op.op === "update" && op.fields.startTime === "13:00");
+  if (!beforeId || beforeId.op !== "update" || beforeId.id !== day1.id) return "出发前「把午饭改到 13:00」应改第 1 天";
+  const beforeApplied = applyPatch(built, { ...before.request, id: "p_lunch_before" });
+  if (!beforeApplied.ok) return beforeApplied.error;
+  if (beforeApplied.book.items.find((item) => item.id === day2.id)?.startTime !== day2.startTime) {
+    return "出发前不应改到第 2 天的午饭";
+  }
+
+  const during = new Date("2026-11-08T04:00:00.000Z");
+  const onTrip: Roadbook = { ...built, startDate: "2026-11-07" };
+  const spoken = planMessage(onTrip, "把午饭改到 13:00", random, during);
+  if (!spoken.request) return spoken.note || "行程中应能改今天的午饭";
+  const spokenId = spoken.request.ops.find((op) => op.op === "update" && op.fields.startTime === "13:00");
+  if (!spokenId || spokenId.op !== "update" || spokenId.id !== day2.id) return "今天是第 2 天时，应改第 2 天的午饭";
+  const menuToday = planItemMove(onTrip, day2.id, "13:00");
+  if (!sameClockOps(spoken.request, menuToday.request)) return "今天这一餐的句子应走挪时间的同一套改动";
+  const applied = applyPatch(onTrip, { ...spoken.request, id: "p_lunch_today" });
+  if (!applied.ok) return applied.error;
+  const day1After = applied.book.items.find((item) => item.id === day1.id);
+  const day2After = applied.book.items.find((item) => item.id === day2.id);
+  if (day1After?.startTime !== day1.startTime) return `第 1 天午饭应停在 ${day1.startTime}，得到 ${day1After?.startTime ?? "无"}`;
+  if (day2After?.startTime === day2.startTime) return "第 2 天午饭应被改到 13:00";
+
+  const hidden: Roadbook = {
+    ...built,
+    items: built.items.map((item) => (item.id === day1.id ? { ...item, startTime: "08:00" } : item)),
+  };
+  const later = planMessage(hidden, "把午饭改到 13:00", random, new Date("2026-11-02T04:00:00.000Z"));
+  if (!later.request) return later.note || "今天没有午饭时应改后面的午饭";
+  const laterId = later.request.ops.find((op) => op.op === "update" && op.fields.startTime === "13:00");
+  if (!laterId || laterId.op !== "update" || laterId.id !== day2.id) return "今天这一餐不在时，应改后面一天的午饭";
+  const menuHidden = planItemMove(hidden, day1.id, "13:00");
+  if (!menuHidden.request) return menuHidden.note || "点某一项挪时间应仍改那一项";
+  const menuHiddenId = menuHidden.request.ops.find((op) => op.op === "update" && op.id === day1.id);
+  if (!menuHiddenId) return "挪时间应改点中的那一顿，而不是今天的午饭";
+
+  const ended = planMessage(onTrip, "把午饭改到 13:00", random, new Date("2026-11-12T04:00:00.000Z"));
+  if (ended.request || ended.note !== "行程已经结束，没有改午饭。") {
+    return `行程结束后不应改第 1 天午饭，得到 ${ended.note || "改了"}`;
+  }
+  const menuEnded = planItemMove(onTrip, day1.id, "13:00");
+  if (!menuEnded.request) return menuEnded.note || "行程结束后，点某一项仍应能挪时间";
+  const menuEndedId = menuEnded.request.ops.find((op) => op.op === "update" && op.fields.startTime === "13:00");
+  if (!menuEndedId || menuEndedId.op !== "update" || menuEndedId.id !== day1.id) return "结束后的挪时间应仍改点中的那一项";
+  return null;
+}
+
+function itemChanged(before: Roadbook, after: Roadbook): boolean {
+  if (before.items.length !== after.items.length) return true;
+  return after.items.some((item) => {
+    const prev = before.items.find((entry) => entry.id === item.id);
+    return (
+      !prev ||
+      prev.title !== item.title ||
+      prev.place !== item.place ||
+      (prev.note ?? "") !== (item.note ?? "") ||
+      prev.startTime !== item.startTime
+    );
+  });
+}
+
+/** Real model: 换一个 (no template left) and 模型修补 must each change an item. Skips when no key is configured. */
+async function assertLiveModelPatch(): Promise<string | null> {
+  if (!hasLlmKey()) return null;
+  const env = readLlmEnv();
+  const now = new Date("2026-11-01T02:00:00.000Z");
+  let n = 0;
+  const random = () => `lv${(n += 1)}`;
+  const draft = buildDraft("从上海去西安玩7天", { id: "live-xian", now, random });
+  const host =
+    draft.items.find((item) => item.type === "景点" && item.title.includes("兵马俑")) ??
+    draft.items.find((item) => item.type === "景点");
+  if (!host) return "在线模型补丁缺少景点";
+  const unlocked = draft.items.map((item) => ({ ...item, locked: false }));
+  const names = cityTemplateNames(draft.city);
+  const missing = names.filter((name) => name !== host.title && !unlocked.some((item) => item.title === name));
+  const filled: Roadbook = {
+    ...draft,
+    items: [
+      ...unlocked,
+      ...missing.map((name, index) => ({
+        ...host,
+        id: `live_fill_${index}`,
+        title: name,
+        locked: false,
+        note: "占位",
+      })),
+    ],
+  };
+  const choice = chooseItemSwap(filled, host.id, true);
+  if (choice.mode !== "model") return `兵马俑换一个应走模型，得到 ${choice.mode}`;
+  const vague: Roadbook = {
+    ...draft,
+    items: unlocked.map((item) => (item.id === host.id ? { ...item, title: "待定", note: undefined } : item)),
+  };
+  const cases: { label: string; book: Roadbook; text: string | null }[] = [
+    { label: "换一个", book: filled, text: choice.text },
+    { label: "模型修补", book: vague, text: null },
+  ];
+  const problems = await mapFixtures(cases, LIVE_CONCURRENCY, async (item) => {
+    try {
+      const plan = await proposeModelPatch(item.book, item.text, env);
+      if (!plan.request) return `${item.label}没有改这一项：${plan.note}`;
+      const applied = applyPatch(item.book, { ...plan.request, id: `p_live_${item.label === "换一个" ? "swap" : "refine"}` });
+      if (!applied.ok) return `${item.label}补丁没有写上：${applied.error}`;
+      if (!itemChanged(item.book, applied.book)) return `${item.label}的补丁没有改到任何一项`;
+      return null;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "模型没有完成";
+      return `${item.label}调用失败：${message.slice(0, 180)}`;
+    }
+  });
+  const failed = problems.filter((item): item is string => Boolean(item));
+  return failed.length > 0 ? failed.join("\n") : null;
+}
+
 function assertShareKeyWrites(): Promise<string | null> {
   const repo = path.resolve(root, "..");
   return new Promise((resolve) => {
@@ -4272,6 +4556,24 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log("  ok lock undo, style locks, notes, swap, meals, share wording");
+  const patchShapeError = assertModelPatchParse();
+  if (patchShapeError) {
+    console.error(`model-patch  ${patchShapeError}`);
+    process.exit(1);
+  }
+  console.log("  ok flat and wrapped model patches");
+  const styleNoteError = assertStyleNotesAndLocks();
+  if (styleNoteError) {
+    console.error(`style-note  ${styleNoteError}`);
+    process.exit(1);
+  }
+  console.log("  ok style notes and locked sight titles");
+  const mealTodayError = assertMealToday();
+  if (mealTodayError) {
+    console.error(`meal-today  ${mealTodayError}`);
+    process.exit(1);
+  }
+  console.log("  ok lunch follows today during the trip");
   const shareKeyError = await assertShareKeyWrites();
   if (shareKeyError) {
     console.error(`share-key  ${shareKeyError}`);
@@ -4401,18 +4703,27 @@ async function main(): Promise<void> {
     }
     console.log("  ok follow-up and confirmed jinan plan");
   }
-  let liveExtractFailed = false;
+  let liveFailed = false;
   if (live) {
     const liveExtractError = await assertLiveExtract();
     if (liveExtractError) {
-      liveExtractFailed = true;
+      liveFailed = true;
       console.error(`extract-live  ${liveExtractError}`);
     } else {
       console.log("  ok live extract sentences");
     }
+    const livePatchError = await assertLiveModelPatch();
+    if (livePatchError) {
+      liveFailed = true;
+      console.error(`model-patch-live  ${livePatchError}`);
+    } else if (hasLlmKey()) {
+      console.log("  ok live model swap and refine");
+    } else {
+      console.log("  skip live model swap and refine (no key)");
+    }
   }
   console.log(`${fixtures.length - failed}/${fixtures.length} passed`);
-  process.exit(failed === 0 && !liveExtractFailed ? 0 : 1);
+  process.exit(failed === 0 && !liveFailed ? 0 : 1);
 }
 
 main().catch((error: unknown) => {

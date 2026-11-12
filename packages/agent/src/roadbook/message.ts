@@ -12,7 +12,7 @@ import {
 } from "./draft";
 import { parseZhNumber } from "../parse";
 import { projectPatch } from "./patch";
-import { formatTime, inferStartDate, inferWeekdayDate, isUnsetWhen, noteForPlacedClock, parseTime } from "./time";
+import { formatTime, inferStartDate, inferWeekdayDate, isUnsetWhen, noteForPlacedClock, parseTime, shanghaiDate, targetDayIndex } from "./time";
 import type { PatchOp, Plan, Roadbook, RoadbookItem } from "./types";
 
 const REGEN_NOTICE = "未锁定的改动已重排。";
@@ -59,10 +59,25 @@ function inMealPeriod(item: RoadbookItem, period: MealPeriod): boolean {
 }
 
 /** 午饭 / 晚饭 name the slot, not the title. Titles are often 附近吃饭 or 家常小馆. */
-function findMealBySlot(book: Roadbook, name: string): RoadbookItem | undefined {
+function findMealBySlot(book: Roadbook, name: string, now: Date): RoadbookItem | undefined {
   const period = MEAL_PERIOD[name.trim()];
   if (!period) return undefined;
-  return book.items.find((item) => inMealPeriod(item, period));
+  const matches = book.items.filter((item) => inMealPeriod(item, period));
+  const byTime = (left: RoadbookItem, right: RoadbookItem) =>
+    left.dayIndex - right.dayIndex || (parseTime(left.startTime) ?? 0) - (parseTime(right.startTime) ?? 0);
+  const target = targetDayIndex(book, now);
+  if (!target.outOfRange) {
+    return matches.filter((item) => item.dayIndex >= target.dayIndex).sort(byTime)[0];
+  }
+  // Before departure, day 1. After the trip, caller refuses instead of rewriting day 1.
+  if (shanghaiDate(now) < book.startDate) {
+    return matches.filter((item) => item.dayIndex === 1).sort(byTime)[0];
+  }
+  return undefined;
+}
+
+function tripHasEnded(book: Roadbook, now: Date): boolean {
+  return targetDayIndex(book, now).outOfRange && shanghaiDate(now) >= book.startDate;
 }
 
 function clock(rawHour: string, rawMinute?: string): string | null {
@@ -728,7 +743,14 @@ export function planMessage(book: Roadbook, text: string, random?: () => string,
     /^把\s*(.+?)\s*改到\s*(\d{1,2}[:：]\d{2}|\d{1,2}\s*点半|[零〇一二两俩三四五六七八九十]+\s*点半|\d{1,2}\s*点(?:\s*\d{1,2}\s*分?)?|[零〇一二两俩三四五六七八九十]+\s*点(?:\s*\d{1,2}\s*分?)?)$/,
   );
   if (move?.[1] && move[2]) {
-    const item = /返程|回程/.test(move[1]) ? returnLeg(book) : findMealBySlot(book, move[1]) ?? findItem(book, move[1]);
+    const mealName = move[1].trim();
+    const mealPeriod = MEAL_PERIOD[mealName];
+    let item: RoadbookItem | undefined;
+    if (/返程|回程/.test(move[1])) item = returnLeg(book);
+    else if (mealPeriod) {
+      item = findMealBySlot(book, mealName, now);
+      if (!item && tripHasEnded(book, now)) return { request: null, note: `行程已经结束，没有改${mealName}。` };
+    } else item = findItem(book, move[1]);
     if (!item) return { request: null, note: "没有找到要改时间的项。" };
     if (!userMayRetimed(book, item)) return { request: null, note: `「${item.title}」已锁定，不能改。` };
     const startTime = parseMoveClock(move[2]);
