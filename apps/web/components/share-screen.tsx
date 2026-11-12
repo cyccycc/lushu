@@ -6,6 +6,7 @@ import {
   formatTime,
   parseTime,
   snapForTripDay,
+  verifyCue,
   weatherMark,
   type SharedItinerary,
 } from "@lushu/agent/roadbook";
@@ -74,6 +75,7 @@ export function ShareScreen({ id, shareKey }: { id: string; shareKey: string }) 
                 .sort((a, b) => (parseTime(a.startTime) ?? 0) - (parseTime(b.startTime) ?? 0))
                 .map((item) => {
                   const mark = factMark(item, now);
+                  const cue = verifyCue(mark.needsVerify, "share");
                   return (
                     <article key={item.id} className="rounded-2xl border border-border bg-card px-3 py-2">
                       <p className="text-sm font-medium">
@@ -97,7 +99,7 @@ export function ShareScreen({ id, shareKey }: { id: string; shareKey: string }) 
                         ) : null}
                         {mark.unavailable ? " · 暂不可用" : ""}
                         {mark.stale ? " · 可能过时" : ""}
-                        {mark.needsVerify ? " · 需要你核实" : ""}
+                        {cue ? ` · ${cue}` : ""}
                         {item.note ? ` · ${item.note}` : ""}
                       </p>
                     </article>
@@ -106,7 +108,7 @@ export function ShareScreen({ id, shareKey }: { id: string; shareKey: string }) 
             </section>
           );
         })}
-        <RoadbookPoster book={itinerary} />
+        <RoadbookPoster book={itinerary} viewer="share" />
       </div>
     </main>
   );

@@ -689,12 +689,22 @@ function sameItemContent(current: RoadbookItem, restored: RoadbookItem): boolean
   return !protectedFieldsDiffer(current, restored) && current.status === restored.status && current.locked === restored.locked;
 }
 
+/** This undo step itself changed the lock or the priority, so the whole patch may revert. */
+function patchRevertsOwnLock(patch: { ops: PatchOp[] } | undefined, itemId: string): boolean {
+  if (!patch) return false;
+  return patch.ops.some((op) => {
+    if (op.op !== "update" || op.id !== itemId) return false;
+    return Object.prototype.hasOwnProperty.call(op.fields, "locked") || Object.prototype.hasOwnProperty.call(op.fields, "priority");
+  });
+}
+
 function undoLockError(book: Roadbook, restored: RoadbookItem[], patchId: string): string | null {
   const restoredById = new Map(restored.map((item) => [item.id, item]));
   const patch = book.patchHistory.find((entry) => entry.id === patchId);
   const added = new Set((patch?.ops ?? []).flatMap((op) => (op.op === "add" ? [op.item.id] : [])));
   for (const item of book.items) {
     if (!item.locked) continue;
+    if (patchRevertsOwnLock(patch, item.id)) continue;
     const prev = restoredById.get(item.id);
     if (!prev) {
       if (added.has(item.id)) continue;

@@ -7,14 +7,17 @@ export {
   describeItemMenu,
   planItemDelete,
   planItemMove,
+  chooseItemSwap,
+  modelSwapText,
   planItemSwap,
   planItemUnlock,
   planLockMust,
   swapCandidate,
   whyForItem,
 } from "./item-menu";
+export type { SwapChoice } from "./item-menu";
 export type { ItemMenu, ItemMenuAction, ItemMenuActionId } from "./item-menu";
-export { factMark, checklistRowRetired, isSearchStale, isWeatherStale, relabelConfirmedSource, weatherMark } from "./honesty";
+export { factMark, checklistRowRetired, isSearchStale, isWeatherStale, relabelConfirmedSource, verifyCue, weatherMark } from "./honesty";
 export { SEARCH_STALE_MS, WEATHER_STALE_MS } from "./honesty";
 export type { FactMark, WeatherMark } from "./honesty";
 export { applyPatch, endsAfterDay, normalizeItem, normalizeRoadbook, normalizeRoadbookUndo, opsFromUnknown, projectPatch, readUndoStack, replaceWeather, setChecklistChecked, undoLast } from "./patch";

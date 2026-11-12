@@ -16,8 +16,10 @@ import {
   planMessage,
   snapForTripDay,
   readUndoStack,
+  STYLE_CONFIRM,
   summarizeChanges,
   undoLast,
+  verifyCue,
   weatherMark,
   type PatchRequest,
   type Roadbook,
@@ -50,6 +52,7 @@ function span(item: RoadbookItem): string {
 
 function FactLine({ item, now }: { item: RoadbookItem; now: Date }) {
   const mark = factMark(item, now);
+  const cue = verifyCue(mark.needsVerify, "owner");
   return (
     <>
       <span data-source={mark.kind}>{mark.kind}</span>
@@ -71,7 +74,7 @@ function FactLine({ item, now }: { item: RoadbookItem; now: Date }) {
       ) : null}
       {mark.unavailable ? " · 暂不可用" : ""}
       {mark.stale ? " · 可能过时" : ""}
-      {mark.needsVerify ? " · 需要你核实" : ""}
+      {cue ? ` · ${cue}` : ""}
       {item.note ? ` · ${item.note}` : ""}
     </>
   );
@@ -451,6 +454,31 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
     setNote(data.note || data.book.statusLine);
   }
 
+  async function askModel(raw: string) {
+    if (!navigator.onLine) {
+      setNote("这句话要联网后交给模型。晚了 1 小时仍可离线重排。");
+      return;
+    }
+    setBusy(true);
+    const res = await fetch(`/api/roadbooks/${id}/message`, {
+      method: "POST",
+      headers: bookHeaders(accessKey),
+      body: JSON.stringify({ text: raw }),
+    }).catch(() => null);
+    setBusy(false);
+    if (!res) {
+      setNote("没连上。");
+      return;
+    }
+    const data = (await res.json().catch(() => null)) as { book?: Roadbook; note?: string; error?: string } | null;
+    if (!res.ok || !data?.book) {
+      setNote(data?.error || "没有改成。");
+      return;
+    }
+    remember(data.book);
+    setNote(data.note || data.book.statusLine);
+  }
+
   async function onTalk(event: FormEvent) {
     event.preventDefault();
     const current = bookRef.current;
@@ -476,28 +504,7 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
       setComposerError(plan.note);
       return;
     }
-    if (!navigator.onLine) {
-      setNote("这句话要联网后交给模型。晚了 1 小时仍可离线重排。");
-      return;
-    }
-    setBusy(true);
-    const res = await fetch(`/api/roadbooks/${id}/message`, {
-      method: "POST",
-      headers: bookHeaders(accessKey),
-      body: JSON.stringify({ text: raw }),
-    }).catch(() => null);
-    setBusy(false);
-    if (!res) {
-      setNote("没连上。");
-      return;
-    }
-    const data = (await res.json().catch(() => null)) as { book?: Roadbook; note?: string; error?: string } | null;
-    if (!res.ok || !data?.book) {
-      setNote(data?.error || "没有改成。");
-      return;
-    }
-    remember(data.book);
-    setNote(data.note || data.book.statusLine);
+    await askModel(raw);
   }
 
   async function toggleCheck(rowId: string, checked: boolean) {
@@ -976,7 +983,7 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
       {pendingStyle ? (
         <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/30" role="presentation">
           <div role="dialog" aria-label="确认换风格" className="w-full max-w-lg space-y-3 rounded-t-2xl bg-background px-4 py-4">
-            <p className="text-sm leading-6">切换风格之后你改过的内容也会撤掉</p>
+            <p className="text-sm leading-6">{STYLE_CONFIRM}</p>
             <div className="flex gap-2">
               <button
                 type="button"
@@ -1005,6 +1012,7 @@ export function RoadbookScreen({ id, accessKey }: { id: string; accessKey: strin
             setUnlockPrompt(null);
           }}
           onCommit={(request) => void commit(request)}
+          onModelSwap={(text) => void askModel(text)}
         />
       ) : null}
     </main>

@@ -1,6 +1,6 @@
 import { applyPatch } from "@lushu/agent/roadbook";
 import { authorizedBook, readPatchBody } from "@/lib/roadbook-http";
-import { enqueueRoadbook } from "@/lib/roadbook-store";
+import { persistRoadbook } from "@/lib/roadbook-store";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +18,6 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
     return Response.json({ error: "补丁无法解析。" }, { status: 400 });
   }
   if (!result.ok) return Response.json({ error: result.error, book: loaded.stored.book }, { status: 400 });
-  await enqueueRoadbook({ accessKey: loaded.stored.accessKey, book: result.book });
+  await persistRoadbook(loaded.stored, result.book);
   return Response.json({ book: result.book });
 }

@@ -56,6 +56,14 @@ function cheapNote(previous: string): string {
   return `更省钱。原来是「${previous}」。改去不收门票的地方，这段也可以改坐公交，不打车。`;
 }
 
+/** Style copy is added after the note that was already there. */
+function appendStyleNote(current: string | undefined, extra: string): string {
+  const base = current?.trim() ?? "";
+  if (!base) return extra;
+  if (base.includes(extra)) return base;
+  return `${base}${/[。！？]$/.test(base) ? "" : "。"}${extra}`;
+}
+
 function relax(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookItem[] {
   return items.flatMap((item) => {
     if (!inScope(book, item, now)) return [item];
@@ -66,7 +74,7 @@ function relax(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookItem[]
         ...item,
         durationMinutes: 75,
         travelEstimateMinutes: item.travelEstimateMinutes == null ? null : Math.min(item.travelEstimateMinutes, 15),
-        note: "更轻松。少排一点，缩短停留。",
+        note: appendStyleNote(item.note, "更轻松。少排一点，缩短停留。"),
         source: { kind: "推断" as const, note: "更轻松" },
       },
     ];
@@ -85,7 +93,7 @@ function saveMoney(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookIt
       return {
         ...item,
         travelEstimateMinutes: item.travelEstimateMinutes == null ? 15 : Math.min(item.travelEstimateMinutes, 20),
-        note: `更省钱。${item.title}先留着。去的时候改坐公交，不打车。`,
+        note: appendStyleNote(item.note, `更省钱。${item.title}先留着。去的时候改坐公交，不打车。`),
         source: { kind: "推断" as const, note: "更省钱" },
       };
     }
@@ -95,7 +103,7 @@ function saveMoney(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookIt
       title: next.name,
       place: `${book.city} · ${next.area}`,
       indoor: next.indoor,
-      note: cheapNote(item.title),
+      note: appendStyleNote(item.note, cheapNote(item.title)),
       source: { kind: "推断" as const, note: "更省钱" },
     };
   });
@@ -115,13 +123,13 @@ function rainy(items: RoadbookItem[], book: Roadbook, now: Date): RoadbookItem[]
         place: `${book.city} · ${alt.area}`,
         indoor: true,
         durationMinutes: Math.min(item.durationMinutes, 90),
-        note: `雨天版。原来是「${item.title}」。${alt.detail}`,
+        note: appendStyleNote(item.note, `雨天版。原来是「${item.title}」。${alt.detail}`),
         source: { kind: "推断" as const, note: "雨天版" },
       };
     }
     return {
       ...item,
-      note: `雨天版。${item.title}仍留在户外，去之前再看一眼。`,
+      note: appendStyleNote(item.note, `雨天版。${item.title}仍留在户外，去之前再看一眼。`),
       source: { kind: "推断" as const, note: "雨天版" },
     };
   });
@@ -139,7 +147,7 @@ function lessWalking(items: RoadbookItem[], book: Roadbook, now: Date): Roadbook
         ...item,
         durationMinutes: longSight ? Math.min(item.durationMinutes, 60) : item.durationMinutes,
         travelEstimateMinutes: item.travelEstimateMinutes == null ? null : Math.min(item.travelEstimateMinutes, 15),
-        note: "少走路。缩短停留，少走一段。",
+        note: appendStyleNote(item.note, "少走路。缩短停留，少走一段。"),
         source: { kind: "推断" as const, note: "少走路" },
       },
     ];
@@ -176,14 +184,14 @@ function diffItems(current: RoadbookItem[], target: RoadbookItem[]): PatchOp[] {
   const targetById = new Map(target.map((item) => [item.id, item]));
   const ops: PatchOp[] = [];
   for (const item of current) {
+    // A lock wins over style and over restoring the main-plan snapshot.
+    if (item.locked) continue;
     const next = targetById.get(item.id);
     if (!next) {
-      if (item.locked) ops.push({ op: "update", id: item.id, fields: { locked: false } });
       ops.push({ op: "remove", id: item.id });
       continue;
     }
     if (signature(item) === signature(next)) continue;
-    if (item.locked) ops.push({ op: "update", id: item.id, fields: { locked: false } });
     ops.push({
       op: "update",
       id: item.id,
@@ -251,6 +259,10 @@ function mergeChecks(previous: MainPlanSnapshot["verifyChecklist"], current: Roa
   });
 }
 
+function stylePatchId(now: Date): string {
+  return `p_style_${now.getTime().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function mentionsSavedMoney(book: Roadbook): boolean {
   const blob = JSON.stringify({ items: book.items, statusLine: book.statusLine });
   return MONEY_SAVED.test(blob);
@@ -287,10 +299,12 @@ export function applyRoadbookStyle(book: Roadbook, style: StyleName, confirmed =
   const ops = diffItems(book.items, target);
   if (style !== "main" && ops.length === 0) return { ok: false, confirm: false, error: "这次改不了。", book };
 
+  const patchId = stylePatchId(now);
+  const known = new Set(book.patchHistory.map((patch) => patch.id));
   const applied = applyPatch(
     book,
     {
-      id: `p_style_${book.patchHistory.length}_${book.undo.length}_${style}`,
+      id: patchId,
       label: style === "main" ? "回到主方案" : style,
       kind: "style",
       ops,
@@ -299,6 +313,9 @@ export function applyRoadbookStyle(book: Roadbook, style: StyleName, confirmed =
     now,
   );
   if (!applied.ok) return { ok: false, confirm: false, error: applied.error, book };
+  if (known.has(patchId) || !applied.book.patchHistory.some((patch) => patch.id === patchId)) {
+    return { ok: false, confirm: false, error: "风格没有写上。", book };
+  }
   let mainPlans = applied.book.mainPlans ?? [];
   let mainPlanId = book.mainPlanId ?? null;
   let plan = planOf(book);

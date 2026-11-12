@@ -1,6 +1,6 @@
 import { guideFor } from "../cities";
 import { planDeleteItem, planMoveItem } from "./message";
-import type { Plan, Roadbook, RoadbookItem } from "./types";
+import type { PatchRequest, Plan, Roadbook, RoadbookItem } from "./types";
 
 export type ItemMenuActionId = "swap" | "move" | "delete" | "why" | "lock" | "unlock";
 
@@ -31,10 +31,27 @@ export function briefLock(item: RoadbookItem): boolean {
   return /体检|开会|会议/.test(item.title);
 }
 
+function whyClauses(text: string): string[] {
+  return text
+    .split(/[。！？!?；;]+/u)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+/** Drop repeated sentences and join the rest with full-width periods. */
 export function whyForItem(item: RoadbookItem): string {
   const parts = [item.note, item.source.note].filter((part): part is string => Boolean(part && part.trim()));
-  if (parts.length === 0) return `${item.source.kind}。没有更多说明。`;
-  return parts.join("");
+  const seen = new Set<string>();
+  const clauses: string[] = [];
+  for (const part of parts) {
+    for (const clause of whyClauses(part)) {
+      if (seen.has(clause)) continue;
+      seen.add(clause);
+      clauses.push(clause);
+    }
+  }
+  if (clauses.length === 0) return `${item.source.kind}。没有更多说明。`;
+  return `${clauses.join("。")}。`;
 }
 
 function usedTitles(book: Roadbook): Set<string> {
@@ -67,16 +84,26 @@ export function describeItemMenu(book: Roadbook, itemId: string, hasModelKey: bo
     };
   }
   const locked = item.locked;
-  const candidate = swapCandidate(book, item);
+  const sight = item.type === "景点";
+  const candidate = sight ? swapCandidate(book, item) : null;
   let swapHint: string | undefined;
-  if (locked) swapHint = "先解锁";
-  else if (!candidate) swapHint = hasModelKey ? "没有可换的景点" : "需要模型密钥";
+  if (sight && locked) swapHint = "先解锁";
+  else if (sight && !candidate && !hasModelKey) swapHint = "需要模型密钥";
+  const actions: ItemMenuAction[] = [];
+  if (sight) {
+    actions.push({
+      id: "swap",
+      label: "换一个",
+      enabled: !locked && (Boolean(candidate) || hasModelKey),
+      hint: swapHint,
+    });
+  }
   return {
     whyOnly: false,
     why,
     unlockNeedsConfirm: locked && briefLock(item),
     actions: [
-      { id: "swap", label: "换一个", enabled: !locked && Boolean(candidate), hint: swapHint },
+      ...actions,
       { id: "move", label: "挪时间", enabled: !locked, hint: locked ? "先解锁" : undefined },
       { id: "delete", label: "删掉", enabled: !locked, hint: locked ? "先解锁" : undefined },
       { id: "why", label: "为什么安排这个", enabled: true },
@@ -95,7 +122,7 @@ export function planItemSwap(book: Roadbook, itemId: string): Plan {
   const next = swapCandidate(book, item);
   if (!next) return { request: null, note: "需要模型密钥" };
   const place = book.city === "未写明的目的地" ? next.area : `${book.city} · ${next.area}`;
-  const note = `已换成「${item.title}」。${next.detail}`;
+  const note = `原来是「${item.title}」。${next.detail}`;
   return {
     request: {
       label: `${item.title}换成${next.name}`,
@@ -117,6 +144,28 @@ export function planItemSwap(book: Roadbook, itemId: string): Plan {
     },
     note: `「${item.title}」换成「${next.name}」。`,
   };
+}
+
+/** Sentence sent to the model when the city template has nothing left to swap in. */
+export function modelSwapText(title: string): string {
+  return `把景点「${title}」换成同城另一个还没排进这本路书的景点。只改这一项的标题、地点和备注。备注写成：原来是「${title}」。不要改锁定项，不要改其他项。`;
+}
+
+export type SwapChoice =
+  | { mode: "template"; request: PatchRequest; note: string }
+  | { mode: "model"; text: string }
+  | { mode: "unavailable"; note: string };
+
+/** Template swap when a same-city sight is left; otherwise the model, and only for sights. */
+export function chooseItemSwap(book: Roadbook, itemId: string, hasModelKey: boolean): SwapChoice {
+  const item = findItem(book, itemId);
+  if (!item) return { mode: "unavailable", note: "没有这一项。" };
+  if (item.type !== "景点" || item.title === "去车站") return { mode: "unavailable", note: "这项不能换。" };
+  if (item.locked) return { mode: "unavailable", note: `「${item.title}」已锁定，先解锁再换。` };
+  const template = planItemSwap(book, itemId);
+  if (template.request) return { mode: "template", request: template.request, note: template.note };
+  if (hasModelKey) return { mode: "model", text: modelSwapText(item.title) };
+  return { mode: "unavailable", note: template.note || "需要模型密钥" };
 }
 
 export function planItemMove(book: Roadbook, itemId: string, startTime: string): Plan {

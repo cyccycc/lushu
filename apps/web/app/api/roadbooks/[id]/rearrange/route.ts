@@ -9,7 +9,7 @@ import {
 } from "@lushu/agent/roadbook";
 import { getWeather } from "@lushu/tools";
 import { authorizedBook } from "@/lib/roadbook-http";
-import { enqueueRoadbook } from "@/lib/roadbook-store";
+import { persistRoadbook } from "@/lib/roadbook-store";
 
 export const dynamic = "force-dynamic";
 
@@ -36,11 +36,11 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   }
   const plan = action === "rain" ? planRain(book) : planTired(book);
   if (!plan.request) {
-    await enqueueRoadbook({ accessKey: loaded.stored.accessKey, book });
+    await persistRoadbook(loaded.stored, book);
     return Response.json({ book, note: plan.note });
   }
   const result = applyPatch(book, plan.request);
   if (!result.ok) return Response.json({ error: result.error, book: loaded.stored.book }, { status: 400 });
-  await enqueueRoadbook({ accessKey: loaded.stored.accessKey, book: result.book });
+  await persistRoadbook(loaded.stored, result.book);
   return Response.json({ book: result.book, note: plan.note });
 }

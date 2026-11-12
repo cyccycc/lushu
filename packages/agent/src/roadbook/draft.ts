@@ -2539,6 +2539,32 @@ function anchoredItems(spec: DraftSpec, random: () => string, now: Date): Roadbo
   return presentItems(items);
 }
 
+function linkedChecklistItem(text: string, items: RoadbookItem[]): string | undefined {
+  if (/空腹|体检/.test(text)) return items.find((item) => /体检/.test(item.title))?.id;
+  if (/返程车站|返程从哪一站/.test(text)) {
+    return (
+      items.find((item) => item.type === "交通" && item.title.startsWith("返回"))?.id ??
+      items.find((item) => item.title === "去车站")?.id
+    );
+  }
+  if (/去程班次/.test(text)) {
+    return items.find(
+      (item) =>
+        item.type === "交通" &&
+        (item.title.startsWith("从") || item.title.startsWith("到达")) &&
+        !item.title.startsWith("返回"),
+    )?.id;
+  }
+  return undefined;
+}
+
+function checklistRows(spec: DraftSpec, items: RoadbookItem[], random: () => string): Roadbook["verifyChecklist"] {
+  return verifyLines(spec).map((text) => {
+    const itemId = linkedChecklistItem(text, items);
+    return itemId ? { id: `v_${random()}`, text, itemId } : { id: `v_${random()}`, text };
+  });
+}
+
 function verifyLines(spec: DraftSpec): string[] {
   const lines: string[] = [];
   if (spec.kind !== "办事") lines.push("开放时间、闭馆日、要不要预约，出发前再核实");
@@ -2670,7 +2696,7 @@ export function buildDraftFromSpec(spec: DraftSpec, options: DraftOptions): Road
     assumptions,
     items,
     weather: [],
-    verifyChecklist: verifyLines(ready.ask || useLegacy(ready) ? ready : scheduled).map((text) => ({ id: `v_${random()}`, text })),
+    verifyChecklist: checklistRows(ready.ask || useLegacy(ready) ? ready : scheduled, items, random),
     patchHistory: [
       {
         id: `p_${random()}`,

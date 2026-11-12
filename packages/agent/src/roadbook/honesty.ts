@@ -108,3 +108,9 @@ export function weatherMark(snap: WeatherSnap | undefined, now = new Date()): We
 export function checklistRowRetired(row: VerifyItem, items: { id: string }[]): boolean {
   return Boolean(row.itemId) && !items.some((item) => item.id === row.itemId);
 }
+
+/** Owner keeps 「需要你核实」. Companions on the share page see 「未核实」. */
+export function verifyCue(needsVerify: boolean, viewer: "owner" | "share"): string {
+  if (!needsVerify) return "";
+  return viewer === "share" ? "未核实" : "需要你核实";
+}

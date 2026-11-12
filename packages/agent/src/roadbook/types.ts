@@ -86,8 +86,11 @@ export type PatchKind = "draft" | "user" | "late" | "rain" | "tired" | "assumpti
 export const ROADBOOK_STYLES = ["更轻松", "更省钱", "雨天版", "少走路"] as const;
 export type RoadbookStyle = (typeof ROADBOOK_STYLES)[number];
 
-/** Shown before replacing a style, or the main plan, after a hand edit. */
-export const STYLE_CONFIRM = "切换风格之后你改过的内容也会撤掉";
+/**
+ * Shown before replacing a style, or the main plan, after a hand edit.
+ * Locked items stay as they are; the prompt says so.
+ */
+export const STYLE_CONFIRM = "切换风格之后你改过的内容也会撤掉。锁定的项会保留。";
 
 export type MainPlanSnapshot = {
   id: string;

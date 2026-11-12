@@ -30,6 +30,8 @@ export function createShareKey(): string {
 }
 
 function directory(): string {
+  const override = process.env.LUSHU_ROADBOOK_DIR?.trim();
+  if (override) return path.resolve(override);
   return path.resolve(process.cwd(), "../../data/roadbooks");
 }
 
@@ -54,6 +56,11 @@ export function enqueueRoadbook(stored: StoredRoadbook): Promise<void> {
   const next = prev.catch(() => undefined).then(() => saveRoadbook(snapshot));
   writes.set(snapshot.book.id, next);
   return next;
+}
+
+/** Keep accessKey, shareKey, and any later stored fields. Only the book changes. */
+export function persistRoadbook(stored: StoredRoadbook, book: Roadbook): Promise<void> {
+  return enqueueRoadbook({ ...stored, book });
 }
 
 export async function readRoadbook(id: string): Promise<StoredRoadbook | null> {

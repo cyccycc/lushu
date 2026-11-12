@@ -2,10 +2,10 @@
 
 import { useState } from "react";
 import {
+  chooseItemSwap,
   describeItemMenu,
   planItemDelete,
   planItemMove,
-  planItemSwap,
   planItemUnlock,
   planLockMust,
   type PatchRequest,
@@ -21,6 +21,7 @@ export function ItemMenuSheet({
   confirmUnlockOnOpen,
   onClose,
   onCommit,
+  onModelSwap,
 }: {
   book: Roadbook;
   item: RoadbookItem;
@@ -29,6 +30,7 @@ export function ItemMenuSheet({
   confirmUnlockOnOpen?: boolean;
   onClose: () => void;
   onCommit: (request: PatchRequest) => void;
+  onModelSwap: (text: string) => void;
 }) {
   const menu = describeItemMenu(book, item.id, hasModelKey);
   const [moving, setMoving] = useState(false);
@@ -122,7 +124,17 @@ export function ItemMenuSheet({
                   return;
                 }
                 if (action.id === "swap") {
-                  run(planItemSwap(book, item.id));
+                  const choice = chooseItemSwap(book, item.id, hasModelKey);
+                  if (choice.mode === "template") {
+                    run({ request: choice.request, note: choice.note });
+                    return;
+                  }
+                  if (choice.mode === "model") {
+                    onModelSwap(choice.text);
+                    onClose();
+                    return;
+                  }
+                  setHint(choice.note);
                   return;
                 }
                 if (action.id === "delete") {

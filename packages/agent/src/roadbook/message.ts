@@ -36,6 +36,35 @@ function findItem(book: Roadbook, name: string): RoadbookItem | undefined {
   );
 }
 
+type MealPeriod = "breakfast" | "lunch" | "dinner";
+
+const MEAL_PERIOD: Record<string, MealPeriod> = {
+  早饭: "breakfast",
+  早餐: "breakfast",
+  午饭: "lunch",
+  午餐: "lunch",
+  中饭: "lunch",
+  晚饭: "dinner",
+  晚餐: "dinner",
+};
+
+/** Breakfast before 11:00, lunch until 16:00, dinner after that. Kind is 餐. */
+function inMealPeriod(item: RoadbookItem, period: MealPeriod): boolean {
+  if (item.type !== "餐") return false;
+  const start = parseTime(item.startTime);
+  if (start == null) return false;
+  if (period === "breakfast") return start < 11 * 60;
+  if (period === "lunch") return start >= 11 * 60 && start < 16 * 60;
+  return start >= 16 * 60;
+}
+
+/** 午饭 / 晚饭 name the slot, not the title. Titles are often 附近吃饭 or 家常小馆. */
+function findMealBySlot(book: Roadbook, name: string): RoadbookItem | undefined {
+  const period = MEAL_PERIOD[name.trim()];
+  if (!period) return undefined;
+  return book.items.find((item) => inMealPeriod(item, period));
+}
+
 function clock(rawHour: string, rawMinute?: string): string | null {
   const hour = Number(rawHour);
   const minute = rawMinute == null || rawMinute === "" ? 0 : Number(rawMinute);
@@ -699,7 +728,7 @@ export function planMessage(book: Roadbook, text: string, random?: () => string,
     /^把\s*(.+?)\s*改到\s*(\d{1,2}[:：]\d{2}|\d{1,2}\s*点半|[零〇一二两俩三四五六七八九十]+\s*点半|\d{1,2}\s*点(?:\s*\d{1,2}\s*分?)?|[零〇一二两俩三四五六七八九十]+\s*点(?:\s*\d{1,2}\s*分?)?)$/,
   );
   if (move?.[1] && move[2]) {
-    const item = /返程|回程/.test(move[1]) ? returnLeg(book) : findItem(book, move[1]);
+    const item = /返程|回程/.test(move[1]) ? returnLeg(book) : findMealBySlot(book, move[1]) ?? findItem(book, move[1]);
     if (!item) return { request: null, note: "没有找到要改时间的项。" };
     if (!userMayRetimed(book, item)) return { request: null, note: `「${item.title}」已锁定，不能改。` };
     const startTime = parseMoveClock(move[2]);

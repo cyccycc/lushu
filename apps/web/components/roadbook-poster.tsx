@@ -6,6 +6,7 @@ import {
   formatTime,
   parseTime,
   snapForTripDay,
+  verifyCue,
   weatherMark,
   type RoadbookItem,
   type SharedItinerary,
@@ -57,7 +58,7 @@ function wrap(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): st
   return lines.length > 0 ? lines : [""];
 }
 
-function factText(item: PosterBook["items"][number], now: Date): string {
+function factText(item: PosterBook["items"][number], now: Date, viewer: "owner" | "share"): string {
   const mark = factMark(item, now);
   const parts: string[] = [mark.kind];
   if (mark.note && !(item.note ?? "").includes(mark.note)) parts.push(mark.note);
@@ -65,12 +66,18 @@ function factText(item: PosterBook["items"][number], now: Date): string {
   if (mark.url) parts.push("来源");
   if (mark.unavailable) parts.push("暂不可用");
   if (mark.stale) parts.push("可能过时");
-  if (mark.needsVerify) parts.push("需要你核实");
+  const cue = verifyCue(mark.needsVerify, viewer);
+  if (cue) parts.push(cue);
   if (item.note) parts.push(item.note);
   return parts.join(" · ");
 }
 
-export function renderRoadbookPoster(book: PosterBook, day: number | "all", now: Date): string {
+export function renderRoadbookPoster(
+  book: PosterBook,
+  day: number | "all",
+  now: Date,
+  viewer: "owner" | "share" = "owner",
+): string {
   const days = [...new Set(book.items.map((item) => item.dayIndex))]
     .filter((value) => day === "all" || value === day)
     .sort((a, b) => a - b);
@@ -109,7 +116,7 @@ export function renderRoadbookPoster(book: PosterBook, day: number | "all", now:
     for (const item of items) {
       pushText(`${span(item)}  ${item.title}`, "600 18px sans-serif", "#1c1917", 2);
       pushText(`${item.place} · ${item.type} · ${item.priority}`, "15px sans-serif", "#57534e", 2);
-      pushText(factText(item, now), "15px sans-serif", "#44403c", 12);
+      pushText(factText(item, now, viewer), "15px sans-serif", "#44403c", 12);
     }
   }
   height += pad;
@@ -129,7 +136,7 @@ export function renderRoadbookPoster(book: PosterBook, day: number | "all", now:
   return canvas.toDataURL("image/png");
 }
 
-export function RoadbookPoster({ book }: { book: PosterBook }) {
+export function RoadbookPoster({ book, viewer = "owner" }: { book: PosterBook; viewer?: "owner" | "share" }) {
   const days = [...new Set(book.items.map((item) => item.dayIndex))].sort((a, b) => a - b);
   const [day, setDay] = useState<number | "all">("all");
   const [url, setUrl] = useState("");
@@ -137,14 +144,14 @@ export function RoadbookPoster({ book }: { book: PosterBook }) {
   useEffect(() => {
     let cancel = false;
     const draw = () => {
-      if (!cancel) setUrl(renderRoadbookPoster(book, day, generatedAt));
+      if (!cancel) setUrl(renderRoadbookPoster(book, day, generatedAt, viewer));
     };
     if ("fonts" in document) void document.fonts.ready.then(draw);
     else draw();
     return () => {
       cancel = true;
     };
-  }, [book, day, generatedAt]);
+  }, [book, day, generatedAt, viewer]);
   return (
     <section className="space-y-2">
       <h2 className="text-sm font-medium">长图</h2>

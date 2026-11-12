@@ -1,6 +1,6 @@
 import { applyRoadbookStyle, ROADBOOK_STYLES, type RoadbookStyle } from "@lushu/agent/roadbook";
 import { authorizedBook } from "@/lib/roadbook-http";
-import { enqueueRoadbook } from "@/lib/roadbook-store";
+import { persistRoadbook } from "@/lib/roadbook-store";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +16,6 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   const result = applyRoadbookStyle(loaded.stored.book, style, body?.confirmed === true);
   if (!result.ok && result.confirm) return Response.json({ confirm: true, note: result.note, book: result.book });
   if (!result.ok) return Response.json({ error: result.error, book: result.book }, { status: 400 });
-  await enqueueRoadbook({ ...loaded.stored, book: result.book });
+  await persistRoadbook(loaded.stored, result.book);
   return Response.json({ book: result.book });
 }

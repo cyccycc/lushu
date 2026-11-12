@@ -1,6 +1,6 @@
 import { setChecklistChecked } from "@lushu/agent/roadbook";
 import { authorizedBook } from "@/lib/roadbook-http";
-import { enqueueRoadbook } from "@/lib/roadbook-store";
+import { persistRoadbook } from "@/lib/roadbook-store";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +15,6 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   }
   const result = setChecklistChecked(loaded.stored.book, rowId, body.checked);
   if (!result.ok) return Response.json({ error: result.error, book: result.book }, { status: 400 });
-  await enqueueRoadbook({ accessKey: loaded.stored.accessKey, book: result.book });
+  await persistRoadbook(loaded.stored, result.book);
   return Response.json({ book: result.book });
 }
