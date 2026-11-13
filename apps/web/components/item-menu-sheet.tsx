@@ -4,7 +4,10 @@ import { useState } from "react";
 import {
   chooseItemSwap,
   describeItemMenu,
+  formatTime,
+  parseTime,
   planItemDelete,
+  planItemDuration,
   planItemMove,
   planItemUnlock,
   planLockMust,
@@ -12,6 +15,14 @@ import {
   type Roadbook,
   type RoadbookItem,
 } from "@lushu/agent/roadbook";
+
+function currentEnd(item: RoadbookItem): string {
+  const start = parseTime(item.startTime);
+  if (start == null) return item.startTime;
+  const end = start + item.durationMinutes;
+  if (end >= 24 * 60) return "23:59";
+  return formatTime(end);
+}
 
 export function ItemMenuSheet({
   book,
@@ -34,7 +45,9 @@ export function ItemMenuSheet({
 }) {
   const menu = describeItemMenu(book, item.id, hasModelKey);
   const [moving, setMoving] = useState(false);
+  const [lasting, setLasting] = useState(false);
   const [clock, setClock] = useState(item.startTime);
+  const [endAt, setEndAt] = useState(currentEnd(item));
   const [confirmUnlock, setConfirmUnlock] = useState(Boolean(confirmUnlockOnOpen));
   const [whyOpen, setWhyOpen] = useState(false);
   const [hint, setHint] = useState("");
@@ -104,6 +117,40 @@ export function ItemMenuSheet({
             </button>
           </form>
         ) : null}
+        {lasting ? (
+          <div className="mb-3 space-y-2">
+            <form
+              className="flex gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                run(planItemDuration(book, item.id, endAt.trim()));
+              }}
+            >
+              <input
+                autoFocus
+                value={endAt}
+                aria-label="结束时间"
+                onChange={(event) => setEndAt(event.target.value)}
+                className="min-w-0 flex-1 rounded-xl border border-input bg-card px-3 py-2 text-base"
+              />
+              <button type="submit" className="rounded-xl bg-primary px-3 text-sm text-primary-foreground">
+                到这时结束
+              </button>
+            </form>
+            <div className="grid grid-cols-4 gap-2">
+              {[1, 2, 3, 4].map((hour) => (
+                <button
+                  key={hour}
+                  type="button"
+                  className="min-h-11 rounded-xl border border-border bg-card text-sm"
+                  onClick={() => run(planItemDuration(book, item.id, hour * 60))}
+                >
+                  {hour} 小时
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
         <div className="grid grid-cols-2 gap-2">
           {menu.actions.map((action) => (
             <button
@@ -120,7 +167,13 @@ export function ItemMenuSheet({
                   return;
                 }
                 if (action.id === "move") {
+                  setLasting(false);
                   setMoving(true);
+                  return;
+                }
+                if (action.id === "duration") {
+                  setMoving(false);
+                  setLasting(true);
                   return;
                 }
                 if (action.id === "swap") {

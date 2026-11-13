@@ -1180,6 +1180,7 @@ function applyBriefFacts(spec: DraftSpec, now: Date): void {
       if (date && !existing.date) existing.date = date;
     }
   }
+  applySpokenErrands(spec, now);
   applySpokenSchedule(spec, now);
   alignDepartureClock(spec);
   alignReturnHonesty(spec);
@@ -1390,6 +1391,35 @@ function statedVisitClock(brief: string, title: string): string | null {
   return null;
 }
 
+/** 诊断 / 办驾照 / 签合同 are 办事 even though they are not 体检 or 开会. */
+function applySpokenErrands(spec: DraftSpec, now: Date): void {
+  const text = spec.brief;
+  const today = shanghaiDate(now);
+  const clocks = clocksIn(text);
+  const blockers = [text.search(/高铁|动车|飞机|航班|出发|返程|返回|回来/)].filter((index) => index >= 0);
+  let added = false;
+  for (const match of text.matchAll(/去([\u4e00-\u9fa5]{2,30}?)(诊断|办驾照|签合同)/g)) {
+    if (match.index == null || !match[1] || !match[2]) continue;
+    const place = match[1];
+    const verb = match[2];
+    const title = `去${place}${verb}`;
+    if (spec.fixed.some((item) => item.title === title || item.title.includes(verb))) continue;
+    const clock = nearestClock(clocks, match.index, text, blockers);
+    spec.fixed.push({
+      date: dateNear(text, match.index, today, now) ?? spec.startDate,
+      time: clock?.time ?? null,
+      endTime: clock?.rangeEnd ?? null,
+      title,
+      place,
+      type: "办事",
+    });
+    added = true;
+  }
+  if (!added || spec.kind !== "旅游") return;
+  if (/玩玩|逛逛|走走|旅游|旅行|景点|爬山|迪士尼|周边玩/.test(text)) return;
+  spec.kind = "办事";
+}
+
 function applySpokenSchedule(spec: DraftSpec, now: Date): void {
   applyArrivalClock(spec, now);
   applyClockedVisits(spec, now);
@@ -1403,14 +1433,14 @@ function extractArea(brief: string): string | null {
 }
 
 function kindOf(brief: string): DraftKind {
-  const business = /体检|开会|会议|出差|面试|看病|复诊/.test(brief);
+  const business = /体检|开会|会议|出差|面试|看病|复诊|诊断|办驾照|签合同/.test(brief);
   const leisure = /玩玩|逛逛|走走|旅游|旅行|景点|爬山|迪士尼|周边玩/.test(brief);
   if (business && leisure) return "混合";
   if (business) return "办事";
   return "旅游";
 }
 
-const ERRAND_TITLE = /体检|开会|会议|面试|出差|看病|复诊/;
+const ERRAND_TITLE = /体检|开会|会议|面试|出差|看病|复诊|诊断|办驾照|签合同/;
 const GENERIC_VISIT = /^(爬山|登山|徒步|逛逛|走走|散步|旅游|旅行|游玩)$/;
 
 export function canonicalVisitName(title: string): string {

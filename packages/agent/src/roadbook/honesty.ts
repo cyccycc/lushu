@@ -5,11 +5,10 @@ export const WEATHER_STALE_MS = 24 * 60 * 60 * 1000;
 export const SEARCH_STALE_MS = 30 * 24 * 60 * 60 * 1000;
 
 const STATED_NOTE = "来自你的原话";
-const EDITED_NOTE = "你改的时间";
+const EDITED_TIME_NOTE = "你改的时间";
+const EDITED_DURATION_NOTE = "你改的时长";
+const FILLER_ERRAND_NOTE = "办事行程补位";
 const HTTP_URL = /^https?:\/\//;
-
-/** User-stated appointments. The clock may still be a guess; the fact is not. */
-const USER_ERRAND = /体检|开会|会议/;
 
 export type FactMark = {
   kind: SourceKind;
@@ -56,11 +55,12 @@ function usableHttpUrl(url: string | undefined): string | undefined {
 }
 
 /**
- * The user moved the clock and left the title and place alone.
- * Kind and note become 实测 / 你改的时间. A usable http(s) link stays, with its fetch time.
+ * The user moved the clock or the duration and left the title and place alone.
+ * Kind becomes 实测. The note defaults to 你改的时间; pass 你改的时长 for a duration edit.
+ * A usable http(s) link stays, with its fetch time.
  */
-export function sourceAfterUserClock(source: ItemSource): ItemSource {
-  const next: ItemSource = { kind: "实测", note: EDITED_NOTE };
+export function sourceAfterUserClock(source: ItemSource, note = EDITED_TIME_NOTE): ItemSource {
+  const next: ItemSource = { kind: "实测", note };
   const url = usableHttpUrl(source.url);
   if (!url) return next;
   next.url = url;
@@ -76,7 +76,7 @@ export function isWeatherStale(snap: WeatherSnap, now = new Date()): boolean {
 
 function confirmedRemark(note: string | undefined): boolean {
   if (!note || note.includes("原话没")) return false;
-  return note.includes(STATED_NOTE) || note.includes(EDITED_NOTE);
+  return note.includes(STATED_NOTE) || note.includes(EDITED_TIME_NOTE) || note.includes(EDITED_DURATION_NOTE);
 }
 
 /** Old books stored user-confirmed facts as 推断. Reading maps those notes onto 实测. */
@@ -85,11 +85,14 @@ export function relabelConfirmedSource(source: ItemSource): ItemSource {
   return { ...source, kind: "实测" };
 }
 
-function userStatedErrand(item: Pick<RoadbookItem, "title" | "note" | "source">): boolean {
-  if (!USER_ERRAND.test(item.title)) return false;
+/**
+ * 办事 the user actually said. The clock may still be 时间推断.
+ * Filler slots are marked 办事行程补位 and stay unverified. Saved books need no new field.
+ */
+export function userStatedErrand(item: Pick<RoadbookItem, "type" | "note" | "source">): boolean {
+  if (item.type !== "办事") return false;
   const blob = `${item.note ?? ""} ${item.source.note ?? ""}`;
-  if (blob.includes("办事行程补位")) return false;
-  return true;
+  return !blob.includes(FILLER_ERRAND_NOTE);
 }
 
 function fetchStamp(fetchedAt: string | undefined, now: Date): { fetchedOn?: string; stale: boolean } {
@@ -101,7 +104,7 @@ function fetchStamp(fetchedAt: string | undefined, now: Date): { fetchedOn?: str
   };
 }
 
-export function factMark(item: Pick<RoadbookItem, "title" | "note" | "source">, now = new Date()): FactMark {
+export function factMark(item: Pick<RoadbookItem, "type" | "title" | "note" | "source">, now = new Date()): FactMark {
   const source = relabelConfirmedSource(item.source);
   const confirmed = confirmedRemark(source.note);
   const url = usableHttpUrl(source.url);

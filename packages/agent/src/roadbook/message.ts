@@ -582,6 +582,188 @@ export function planMoveItem(book: Roadbook, itemId: string, startTime: string):
   return clockChange(book, item, startTime);
 }
 
+const MIN_USER_DURATION = 15;
+const MAX_USER_DURATION = 600;
+const DAY_MINUTES = 24 * 60;
+
+function isReturnRide(book: Roadbook, item: RoadbookItem): boolean {
+  return returnLeg(book)?.id === item.id;
+}
+
+/** Locked items, 去车站, and 返程 stay put, same as 「晚了 1 小时」. Finished items stay too. */
+function durationAnchor(book: Roadbook, item: RoadbookItem): boolean {
+  return item.locked || item.title === "去车站" || isReturnRide(book, item) || item.status !== "待做";
+}
+
+function dayCutoff(book: Roadbook, day: number, editedId: string): number {
+  const marks: number[] = [];
+  for (const entry of book.items) {
+    if (entry.dayIndex !== day || entry.id === editedId) continue;
+    if (entry.title !== "去车站" && !isReturnRide(book, entry)) continue;
+    const start = parseTime(entry.startTime);
+    if (start != null) marks.push(start);
+  }
+  return marks.length > 0 ? Math.min(...marks) : DAY_MINUTES;
+}
+
+type MinuteBlock = { start: number; end: number };
+
+function blockHit(start: number, duration: number, blocks: MinuteBlock[]): MinuteBlock | undefined {
+  return blocks.find((block) => start < block.end && start + duration > block.start);
+}
+
+function readUserDuration(item: RoadbookItem, change: number | string): number | string {
+  const start = parseTime(item.startTime);
+  if (start == null) return "这个时间无法解析。";
+  let minutes: number;
+  if (typeof change === "number") minutes = change;
+  else {
+    const endClock = parseTime(change.trim()) != null ? change.trim() : parseMoveClock(change.trim());
+    const end = endClock ? parseTime(endClock) : null;
+    if (end == null) return "这个时间无法解析。";
+    if (end <= start) return "不能跨过午夜。";
+    minutes = end - start;
+  }
+  if (!Number.isInteger(minutes) || minutes < MIN_USER_DURATION) return "时长至少要 15 分钟。";
+  if (minutes > MAX_USER_DURATION) return "时长不能超过 10 小时。";
+  if (start + minutes >= DAY_MINUTES) return "不能跨过午夜。";
+  return minutes;
+}
+
+/**
+ * Set one item's duration. Later unlocked items shift like 「晚了 1 小时」:
+ * locked items, 去车站, and 返程 stay. If one of those blocks the new span, nothing changes.
+ * A later item that cannot sit without overlap is removed.
+ */
+export function planDurationItem(book: Roadbook, itemId: string, change: number | string): Plan {
+  const item = book.items.find((entry) => entry.id === itemId);
+  if (!item) return { request: null, note: "没有这一项。" };
+  if (item.title === "去车站") return { request: null, note: "去车站跟着返程走，不能改时长。" };
+  if (item.locked) return { request: null, note: `「${item.title}」已锁定，先解锁再改时长。` };
+  const startMin = parseTime(item.startTime);
+  if (startMin == null) return { request: null, note: "这个时间无法解析。" };
+  const minutes = readUserDuration(item, change);
+  if (typeof minutes === "string") return { request: null, note: minutes };
+  if (minutes === item.durationMinutes) return { request: null, note: `「${item.title}」已经是这个时长。` };
+
+  const newEnd = startMin + minutes;
+  const delta = minutes - item.durationMinutes;
+  const day = item.dayIndex;
+  const others = book.items.filter((entry) => entry.dayIndex === day && entry.id !== item.id);
+  const overlapsNew = (entry: RoadbookItem) => {
+    const other = parseTime(entry.startTime);
+    if (other == null) return false;
+    return startMin < other + entry.durationMinutes && newEnd > other;
+  };
+  const blockers = others
+    .filter((entry) => durationAnchor(book, entry) && overlapsNew(entry))
+    .sort((a, b) => (parseTime(a.startTime) ?? 0) - (parseTime(b.startTime) ?? 0));
+  if (blockers.length > 0) {
+    const names = blockers.map((entry) => entry.title).join("、");
+    return { request: null, note: `「${names}」和改后的时长冲突，这次没有改。` };
+  }
+
+  const cutoff = dayCutoff(book, day, item.id);
+  const placed: MinuteBlock[] = [{ start: startMin, end: newEnd }];
+  for (const entry of others) {
+    if (!durationAnchor(book, entry)) continue;
+    const other = parseTime(entry.startTime);
+    if (other == null) continue;
+    placed.push({ start: other, end: other + entry.durationMinutes });
+  }
+  const flex = others
+    .filter((entry) => !durationAnchor(book, entry))
+    .sort((a, b) => (parseTime(a.startTime) ?? 0) - (parseTime(b.startTime) ?? 0));
+  const dropped: RoadbookItem[] = [];
+  const moves: { id: string; startTime: string }[] = [];
+  for (const entry of flex) {
+    const original = parseTime(entry.startTime);
+    if (original == null) return { request: null, note: `「${entry.title}」的时间无法解析。` };
+    const squeezed = delta > 0 && original <= newEnd && original + entry.durationMinutes > startMin;
+    let next = squeezed ? Math.max(original + delta, newEnd) : original;
+    if (!squeezed && !blockHit(original, entry.durationMinutes, placed)) {
+      placed.push({ start: original, end: original + entry.durationMinutes });
+      continue;
+    }
+    let guard = 0;
+    let hit = blockHit(next, entry.durationMinutes, placed);
+    while (hit) {
+      next = hit.end;
+      guard += 1;
+      if (guard > 24) break;
+      hit = blockHit(next, entry.durationMinutes, placed);
+    }
+    const runsIntoCutoff = cutoff < DAY_MINUTES && (next >= cutoff || next + entry.durationMinutes > cutoff);
+    if (guard > 24 || next + entry.durationMinutes >= DAY_MINUTES || runsIntoCutoff || blockHit(next, entry.durationMinutes, placed)) {
+      dropped.push(entry);
+      continue;
+    }
+    placed.push({ start: next, end: next + entry.durationMinutes });
+    const formatted = formatTime(next);
+    if (formatted !== entry.startTime) moves.push({ id: entry.id, startTime: formatted });
+  }
+
+  const endLabel = formatTime(newEnd);
+  const droppedNote = dropped.length > 0 ? `已拿掉${dropped.map((entry) => entry.title).join("、")}。` : "";
+  const note = `「${item.title}」改成 ${item.startTime}–${endLabel}。${droppedNote}`;
+  const ops: PatchOp[] = [
+    {
+      op: "update",
+      id: item.id,
+      fields: {
+        durationMinutes: minutes,
+        source: sourceAfterUserClock(item.source, "你改的时长"),
+      },
+    },
+    ...moves.map((move) => ({ op: "update" as const, id: move.id, fields: { startTime: move.startTime } })),
+    ...dropped.map((entry) => ({ op: "remove" as const, id: entry.id })),
+  ];
+  return {
+    request: {
+      label: `${item.title}改时长`,
+      kind: "user",
+      ops,
+      statusNote: note,
+    },
+    note,
+  };
+}
+
+const DURATION_CLOCK =
+  "\\d{1,2}[:：]\\d{2}|\\d{1,2}\\s*点半|[零〇一二两俩三四五六七八九十]+\\s*点半|\\d{1,2}\\s*点(?:\\s*\\d{1,2}\\s*分?)?|[零〇一二两俩三四五六七八九十]+\\s*点(?:\\s*\\d{1,2}\\s*分?)?";
+
+type DurationAsk =
+  | { name: string; kind: "set"; minutes: number }
+  | { name: string; kind: "add"; minutes: number }
+  | { name: string; kind: "end"; end: string };
+
+function matchDurationAsk(raw: string): DurationAsk | string | undefined {
+  const hours = "(\\d+|[零〇一二两三四五六七八九十]+)";
+  const set = new RegExp(`^(?:把|将)?\\s*(.+?)\\s*(?:留|改成|改为|调整为|设为|设成)\\s*${hours}\\s*个?\\s*小时$`).exec(raw);
+  if (set?.[1] && set[2]) {
+    const count = parseZhNumber(set[2]);
+    if (count == null) return "这个时长没有看懂。";
+    return { name: set[1].trim(), kind: "set", minutes: count * 60 };
+  }
+  const extra = new RegExp(`^(?:把|将)?\\s*(.+?)\\s*延长\\s*${hours}\\s*个?\\s*小时$`).exec(raw);
+  if (extra?.[1] && extra[2]) {
+    const count = parseZhNumber(extra[2]);
+    if (count == null) return "这个时长没有看懂。";
+    return { name: extra[1].trim(), kind: "add", minutes: count * 60 };
+  }
+  const ending = new RegExp(`^(?:把|将)?\\s*(.+?)\\s*到\\s*(${DURATION_CLOCK})\\s*结束$`).exec(raw);
+  if (ending?.[1] && ending[2]) return { name: ending[1].trim(), kind: "end", end: ending[2].trim() };
+  return undefined;
+}
+
+function planDurationAsk(book: Roadbook, ask: DurationAsk): Plan {
+  const item = findItem(book, ask.name);
+  if (!item) return { request: null, note: "没有找到要改时长的项。" };
+  if (ask.kind === "set") return planDurationItem(book, item.id, ask.minutes);
+  if (ask.kind === "add") return planDurationItem(book, item.id, item.durationMinutes + ask.minutes);
+  return planDurationItem(book, item.id, ask.end);
+}
+
 function isInferredReturn(book: Roadbook, item: RoadbookItem): boolean {
   if (returnLeg(book)?.id !== item.id) return false;
   return !returnIsExplicit(book, item);
@@ -756,6 +938,9 @@ export function planMessage(book: Roadbook, text: string, random?: () => string,
     if (!startTime) return { request: null, note: "这个时间无法解析。" };
     return clockChange(book, item, startTime);
   }
+  const durationAsk = matchDurationAsk(raw);
+  if (typeof durationAsk === "string") return { request: null, note: durationAsk };
+  if (durationAsk) return planDurationAsk(book, durationAsk);
   const dayCount = matchTripDays(raw);
   if (dayCount !== undefined) {
     const assumption = assumptionOf(book, "days");

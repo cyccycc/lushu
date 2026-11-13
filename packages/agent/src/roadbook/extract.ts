@@ -121,7 +121,7 @@ function cleanFixed(value: unknown): TripFixed | null {
     endTime: cleanTime(raw.endTime),
     title,
     place: clip(raw.place, 40),
-    type: type ?? (/体检|开会|会议|面试|出差/.test(title) ? "办事" : "自由"),
+    type: type ?? (/体检|开会|会议|面试|出差|看病|复诊|诊断|办驾照|签合同/.test(title) ? "办事" : "自由"),
   };
 }
 

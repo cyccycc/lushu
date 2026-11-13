@@ -676,11 +676,11 @@ export function opsFromUnknown(raw: unknown): { ops: PatchOp[] } | { error: stri
   return { ops };
 }
 
-const MODEL_CLAIM = /来自你的原话|你改的时间/g;
+const MODEL_CLAIM = /来自你的原话|你改的时长|你改的时间/g;
 
 /** Model copy must not wear a user-stated label. Real user edits keep these phrases. */
 export function stripModelClaim(text: string): string {
-  if (!text.includes("来自你的原话") && !text.includes("你改的时间")) return text;
+  if (!text.includes("来自你的原话") && !text.includes("你改的时间") && !text.includes("你改的时长")) return text;
   const next = text
     .replace(MODEL_CLAIM, "")
     .replace(/[·・]{2,}/g, "·")

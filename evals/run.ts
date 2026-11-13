@@ -46,6 +46,7 @@ import {
   normalizeRoadbookUndo,
   planAssumptionEdit,
   planItemDelete,
+  planItemDuration,
   planItemMove,
   planItemSwap,
   planItemUnlock,
@@ -4225,7 +4226,7 @@ function assertItemMenu(): string | null {
   if (typeof menu === "string") return menu;
   if (menu.whyOnly) return "普通景点不应只有为什么";
   const enabled = (id: string) => menu.actions.find((action) => action.id === id)?.enabled;
-  if (!enabled("swap") || !enabled("move") || !enabled("delete") || !enabled("why") || !enabled("lock")) {
+  if (!enabled("swap") || !enabled("move") || !enabled("duration") || !enabled("delete") || !enabled("why") || !enabled("lock")) {
     return `未锁定景点的菜单应都能点：${menu.actions.map((action) => `${action.label}${action.enabled ? "" : "灰"}`).join("、")}`;
   }
   const swapped = planItemSwap(book, sight.id);
@@ -4300,9 +4301,11 @@ function assertItemMenu(): string | null {
   if (!must?.locked || must.priority !== "必去" || !must.highlight) return "锁定必去应同时锁定并标必去";
   const lockedMenu = describeItemMenu(lockedBook.book, sight.id, false);
   if (typeof lockedMenu === "string") return lockedMenu;
-  if (lockedMenu.actions.some((action) => (action.id === "swap" || action.id === "move" || action.id === "delete") && action.enabled)) {
-    return "锁定后不能换、挪、删";
+  if (lockedMenu.actions.some((action) => (action.id === "swap" || action.id === "move" || action.id === "duration" || action.id === "delete") && action.enabled)) {
+    return "锁定后不能换、挪、改时长、删";
   }
+  const lockedDuration = lockedMenu.actions.find((action) => action.id === "duration");
+  if (!lockedDuration || lockedDuration.hint !== "先解锁") return `锁定后改时长应提示先解锁，得到 ${lockedDuration?.hint ?? "无"}`;
   const late = planLate(lockedBook.book, now);
   if (late.request) {
     const lateBook = applyPatch(lockedBook.book, { ...late.request, id: "p_late_lock" });
@@ -5351,6 +5354,310 @@ function assertShareKeyWrites(): Promise<string | null> {
   });
 }
 
+function dayDump(book: Roadbook, day: number): string {
+  return book.items
+    .filter((item) => item.dayIndex === day)
+    .map((item) => `${item.startTime}/${item.durationMinutes} ${item.title}${item.locked ? "锁" : ""}`)
+    .join(" | ");
+}
+
+function spokenErrandProblem(book: Roadbook, verb: string): string | null {
+  const item = book.items.find((entry) => entry.type === "办事" && (entry.title.includes(verb) || verb.includes(entry.title)));
+  if (!item) return `应有办事「${verb}」，当天是 ${dayDump(book, 1)}`;
+  const blob = `${item.note ?? ""} ${item.source.note ?? ""}`;
+  if (item.locked) return `${verb} 没写钟点不应锁定`;
+  if (item.source.kind !== "推断") return `${verb} 来源应仍是推断，得到 ${item.source.kind}`;
+  if (!blob.includes("时间推断")) return `${verb} 应标时间推断：${blob}`;
+  if (blob.includes("来自你的原话")) return `${verb} 没写钟点不应写成来自你的原话：${blob}`;
+  if (factMark(item).needsVerify) return `${verb} 不应显示成需要你核实`;
+  if (verifyCue(factMark(item).needsVerify, "owner") !== "") return `${verb} 的核实提示应为空`;
+  if (item.startTime !== "08:00" || item.durationMinutes !== 120) {
+    return `${verb} 应是 08:00 起 2 小时，得到 ${item.startTime} / ${item.durationMinutes}`;
+  }
+  return null;
+}
+
+function assertStatedErrandsAndDuration(): string | null {
+  const now = new Date("2026-11-13T05:41:00.000Z");
+  let n = 0;
+  const random = () => `d${(n += 1)}`;
+  const shanghai = buildDraft("明天去上海普陀中心医院诊断", { id: "sh-dx", now, random });
+  const diagnosisProblem = spokenErrandProblem(shanghai, "诊断");
+  if (diagnosisProblem) return `上海诊断：${diagnosisProblem}`;
+  const diagnosis = shanghai.items.find((item) => item.title.includes("诊断"));
+  if (!diagnosis) return "缺少诊断";
+  if (shanghai.city !== "上海") return `诊断行程应在上海，得到 ${shanghai.city}`;
+  const lunch = shanghai.items.find((item) => item.dayIndex === diagnosis.dayIndex && item.type === "餐" && item.startTime === "12:00");
+  if (!lunch) return `诊断当天应有 12:00 的饭：${dayDump(shanghai, diagnosis.dayIndex)}`;
+
+  const licenseRules = specFromRules("去车管所办驾照", now);
+  if (!licenseRules.fixed.some((item) => item.type === "办事" && item.title.includes("办驾照"))) {
+    return "去车管所办驾照应抽成办事";
+  }
+  const contractRules = specFromRules("去公司签合同", now);
+  if (!contractRules.fixed.some((item) => item.type === "办事" && item.title.includes("签合同"))) {
+    return "去公司签合同应抽成办事";
+  }
+  const tomorrow = addDays(shanghaiDate(now), 1);
+  const placeErrand = (brief: string, title: string, place: string) =>
+    buildDraftFromSpec(
+      specFromExtract(
+        {
+          kind: "办事",
+          origin: null,
+          destination: { city: "上海", area: null },
+          startDate: tomorrow,
+          endDate: tomorrow,
+          party: 1,
+          outbound: null,
+          inbound: null,
+          fixed: [{ date: tomorrow, time: null, endTime: null, title, place, type: "办事" }],
+          lodging: null,
+          interests: [],
+          pace: null,
+          budget: null,
+          missing: [],
+        },
+        now,
+        null,
+        brief,
+      ),
+      { id: title, now, random },
+    );
+  const license = placeErrand("去车管所办驾照", "去车管所办驾照", "车管所");
+  const contract = placeErrand("去公司签合同", "去公司签合同", "公司");
+  const licenseProblem = spokenErrandProblem(license, "办驾照");
+  if (licenseProblem) return `办驾照：${licenseProblem}`;
+  const contractProblem = spokenErrandProblem(contract, "签合同");
+  if (contractProblem) return `签合同：${contractProblem}`;
+
+  const filler = {
+    ...diagnosis,
+    id: "i_filler",
+    title: "补一档办事",
+    note: "办事行程，不套用景点。",
+    source: { kind: "推断" as const, note: "办事行程补位" },
+  };
+  if (!factMark(filler).needsVerify || verifyCue(true, "owner") !== "需要你核实") return "办事行程补位仍应需要你核实";
+
+  const taishan = buildDraft("明天早上7点去爬泰山", { id: "dx-tai", now, random });
+  const climb = taishan.items.find((item) => item.title.includes("泰山") && item.locked);
+  if (!climb) return "写了钟点的泰山应锁定";
+  const climbUnlock = planItemUnlock(taishan, climb.id, false);
+  if (climbUnlock.request || !climbUnlock.note.includes("原话")) return `原话里的景点解锁应先确认：${climbUnlock.note}`;
+
+  const lockedMenuItem = planLockMust(shanghai, diagnosis.id);
+  if (!lockedMenuItem.request) return lockedMenuItem.note;
+  const lockedBook = applyPatch(shanghai, { ...lockedMenuItem.request, id: "p_lock_dx" });
+  if (!lockedBook.ok) return lockedBook.error;
+  const lockedMenu = describeItemMenu(lockedBook.book, diagnosis.id, false);
+  if (typeof lockedMenu === "string") return lockedMenu;
+  const durationAction = lockedMenu.actions.find((action) => action.id === "duration");
+  if (!durationAction || durationAction.enabled || durationAction.hint !== "先解锁") {
+    return `锁定的诊断改时长应提示先解锁，得到 ${durationAction?.enabled ? "可点" : durationAction?.hint ?? "无"}`;
+  }
+  const lockedChange = planItemDuration(lockedBook.book, diagnosis.id, 240);
+  if (lockedChange.request || !lockedChange.note.includes("先解锁")) return `锁定后改时长应拒绝：${lockedChange.note}`;
+
+  const four = planMessage(shanghai, "诊断留 4 小时", random, now);
+  const fourMenu = planItemDuration(shanghai, diagnosis.id, 240);
+  if (!four.request || !fourMenu.request) return four.note || fourMenu.note || "诊断留 4 小时没有生效";
+  if (JSON.stringify(four.request.ops) !== JSON.stringify(fourMenu.request.ops)) return "改时长菜单应和「诊断留 4 小时」同一套改动";
+  const fourBook = applyPatch(shanghai, { ...four.request, id: "p_dx_4h" });
+  if (!fourBook.ok) return fourBook.error;
+  const fourDx = fourBook.book.items.find((item) => item.id === diagnosis.id);
+  const fourLunch = fourBook.book.items.find((item) => item.id === lunch.id);
+  if (!fourDx || fourDx.startTime !== "08:00" || fourDx.durationMinutes !== 240 || !fourDx.highlight) {
+    return `诊断应改成 08:00–12:00 并标刚改，得到 ${fourDx?.startTime} / ${fourDx?.durationMinutes} highlight=${fourDx?.highlight}`;
+  }
+  if (fourDx.source.kind !== "实测" || fourDx.source.note !== "你改的时长") {
+    return `改时长应标实测和你改的时长，得到 ${fourDx.source.kind} ${fourDx.source.note ?? ""}`;
+  }
+  if (!fourDx.note?.includes("时间推断") || fourDx.note.includes("你改的时间")) {
+    return `改时长不应改写成你改的时间：${fourDx.note}`;
+  }
+  if (!fourLunch || fourLunch.startTime <= "12:00" || rangesOverlap(fourDx, fourLunch)) {
+    return `12:00 的饭应晚于诊断且不重叠，得到 ${fourLunch?.startTime ?? "已拿掉"}；${dayDump(fourBook.book, diagnosis.dayIndex)}`;
+  }
+  for (const item of fourBook.book.items) {
+    if (item.id !== fourDx.id && rangesOverlap(fourDx, item)) return `改时长后仍重叠：${item.title} ${item.startTime}`;
+  }
+  const undone = undoLast(fourBook.book);
+  if (!undone.ok) return undone.error;
+  const backDx = undone.book.items.find((item) => item.id === diagnosis.id);
+  const backLunch = undone.book.items.find((item) => item.id === lunch.id);
+  if (!backDx || backDx.startTime !== "08:00" || backDx.durationMinutes !== 120) {
+    return `撤销应回到 08:00–10:00，得到 ${backDx?.startTime} / ${backDx?.durationMinutes}`;
+  }
+  if (!backLunch || backLunch.startTime !== "12:00") return `撤销应把饭放回 12:00，得到 ${backLunch?.startTime ?? "无"}`;
+
+  const untilNoon = planMessage(shanghai, "诊断到 12 点结束", random, now);
+  if (!untilNoon.request) return untilNoon.note || "诊断到 12 点结束没有生效";
+  const noonBook = applyPatch(shanghai, { ...untilNoon.request, id: "p_dx_noon" });
+  if (!noonBook.ok) return noonBook.error;
+  const noonDx = noonBook.book.items.find((item) => item.id === diagnosis.id);
+  if (!noonDx || noonDx.startTime !== "08:00" || noonDx.durationMinutes !== 240) {
+    return `到 12 点结束应是 08:00–12:00，得到 ${noonDx?.startTime} / ${noonDx?.durationMinutes}`;
+  }
+
+  const three = planMessage(shanghai, "诊断改成 3 小时", random, now);
+  if (!three.request) return three.note || "诊断改成 3 小时没有生效";
+  const threeBook = applyPatch(shanghai, { ...three.request, id: "p_dx_3h" });
+  if (!threeBook.ok) return threeBook.error;
+  const threeDx = threeBook.book.items.find((item) => item.id === diagnosis.id);
+  if (!threeDx || threeDx.durationMinutes !== 180 || threeDx.startTime !== "08:00") {
+    return `改成 3 小时应是 180 分钟，得到 ${threeDx?.durationMinutes}`;
+  }
+  const hospital = planMessage(shanghai, "医院留 3 小时", random, now);
+  if (!hospital.request) return hospital.note || "医院留 3 小时没有生效";
+  if (JSON.stringify(hospital.request.ops) !== JSON.stringify(three.request.ops)) return "医院留 3 小时应改到同一项";
+  const longer = planMessage(shanghai, "诊断延长 1 小时", random, now);
+  if (!longer.request) return longer.note || "诊断延长 1 小时没有生效";
+  const longerBook = applyPatch(shanghai, { ...longer.request, id: "p_dx_plus" });
+  if (!longerBook.ok) return longerBook.error;
+  const plus = longerBook.book.items.find((item) => item.id === diagnosis.id);
+  if (!plus || plus.durationMinutes !== diagnosis.durationMinutes + 60) {
+    return `延长 1 小时应变成 ${diagnosis.durationMinutes + 60} 分钟，得到 ${plus?.durationMinutes}`;
+  }
+
+  const untilThree = planMessage(shanghai, "诊断到 15 点结束", random, now);
+  if (!untilThree.request) return untilThree.note || "诊断到 15 点结束没有生效";
+  const threePm = applyPatch(shanghai, { ...untilThree.request, id: "p_dx_15" });
+  if (!threePm.ok) return threePm.error;
+  const endDx = threePm.book.items.find((item) => item.id === diagnosis.id);
+  const endLunch = threePm.book.items.find((item) => item.id === lunch.id);
+  if (!endDx || endDx.startTime !== "08:00" || endDx.durationMinutes !== 7 * 60) {
+    return `到 15 点应是 08:00 起 7 小时，得到 ${endDx?.startTime} / ${endDx?.durationMinutes}`;
+  }
+  if (endLunch && rangesOverlap(endDx, endLunch)) return `15 点的诊断和午饭重叠：${endLunch.startTime}`;
+  if (!endLunch && !untilThree.note.includes("已拿掉")) return `午饭被拿掉时要写已拿掉：${untilThree.note}`;
+  for (const item of threePm.book.items) {
+    if (item.id !== endDx.id && rangesOverlap(endDx, item)) return `到 15 点后仍重叠：${item.title} ${item.startTime}`;
+  }
+
+  const cited = {
+    ...shanghai,
+    items: shanghai.items.map((item) =>
+      item.id === diagnosis.id
+        ? {
+            ...item,
+            source: {
+              kind: "检索" as const,
+              url: "https://example.com/hospital",
+              fetchedAt: "2026-11-01T00:00:00.000Z",
+              note: "挂号说明",
+            },
+          }
+        : item,
+    ),
+  };
+  const keptLink = planItemDuration(cited, diagnosis.id, 180);
+  if (!keptLink.request) return keptLink.note;
+  const keptBook = applyPatch(cited, { ...keptLink.request, id: "p_dx_link" });
+  if (!keptBook.ok) return keptBook.error;
+  const linked = keptBook.book.items.find((item) => item.id === diagnosis.id);
+  if (
+    !linked ||
+    linked.source.kind !== "实测" ||
+    linked.source.note !== "你改的时长" ||
+    linked.source.url !== "https://example.com/hospital" ||
+    linked.source.fetchedAt !== "2026-11-01T00:00:00.000Z"
+  ) {
+    return `改时长应留下检索链接，得到 ${linked?.source.kind} ${linked?.source.note ?? ""} ${linked?.source.url ?? ""}`;
+  }
+  const ftpBook = {
+    ...cited,
+    items: cited.items.map((item) =>
+      item.id === diagnosis.id ? { ...item, source: { kind: "检索" as const, url: "ftp://example.com/hospital", fetchedAt: "2026-11-01T00:00:00.000Z", note: "挂号说明" } } : item,
+    ),
+  };
+  const ftpPlan = planItemDuration(ftpBook, diagnosis.id, 180);
+  if (!ftpPlan.request) return ftpPlan.note;
+  const ftpApplied = applyPatch(ftpBook, { ...ftpPlan.request, id: "p_dx_ftp" });
+  if (!ftpApplied.ok) return ftpApplied.error;
+  const ftpItem = ftpApplied.book.items.find((item) => item.id === diagnosis.id);
+  if (ftpItem?.source.url || ftpItem?.source.note !== "你改的时长") return "改时长应丢掉非 http 链接";
+
+  const tooShort = planItemDuration(shanghai, diagnosis.id, 10);
+  if (tooShort.request || !tooShort.note.includes("15")) return `短于 15 分钟应拒绝：${tooShort.note}`;
+  const ten = planMessage(shanghai, "诊断到 08:10 结束", random, now);
+  if (ten.request || !ten.note.includes("15")) return `到 08:10 结束应拒绝：${ten.note}`;
+  const lateBook = {
+    ...shanghai,
+    items: shanghai.items.map((item) => (item.id === diagnosis.id ? { ...item, startTime: "23:00", durationMinutes: 30 } : item)),
+  };
+  const midnight = planItemDuration(lateBook, diagnosis.id, 120);
+  if (midnight.request || !midnight.note.includes("午夜")) return `跨过午夜应拒绝：${midnight.note}`;
+  const backward = planMessage(lateBook, "诊断到 7 点结束", random, now);
+  if (backward.request || !backward.note.includes("午夜")) return `结束早于开始应拒绝：${backward.note}`;
+
+  const jinan = buildDraft(
+    "我今天下午 2 点的高铁，从上海去往济南。明天早上体检，在汉峪金谷那边，我已经订好了附近的酒店。明天下午 4 点半返程",
+    { id: "dx-jn", now, random },
+  );
+  const checkup = jinan.items.find((item) => item.title.includes("体检"));
+  const station = jinan.items.find((item) => item.title === "去车站");
+  const rideBack = jinan.items.find((item) => item.locked && item.type === "交通" && item.dayIndex === checkup?.dayIndex && item.id !== station?.id);
+  if (!checkup || checkup.locked || checkup.startTime !== "08:00") return `济南体检应是未锁定的 08:00，得到 ${checkup?.startTime} locked=${checkup?.locked}`;
+  if (!station || station.startTime !== "15:30" || station.dayIndex !== checkup.dayIndex) {
+    return `去车站应在体检当天 15:30，得到 ${station?.startTime}`;
+  }
+  if (!rideBack || rideBack.startTime !== "16:30") return `返程应锁定在 16:30，得到 ${rideBack?.startTime}`;
+  const six = planMessage(jinan, "体检留 6 小时", random, now);
+  if (!six.request) return six.note || "6 小时体检应排得下";
+  const sixBook = applyPatch(jinan, { ...six.request, id: "p_jn_6h" });
+  if (!sixBook.ok) return sixBook.error;
+  const sixExam = sixBook.book.items.find((item) => item.id === checkup.id);
+  const sixStation = sixBook.book.items.find((item) => item.id === station.id);
+  const sixBack = sixBook.book.items.find((item) => item.id === rideBack.id);
+  if (!sixExam || sixExam.startTime !== "08:00" || sixExam.durationMinutes !== 360) {
+    return `6 小时体检应是 08:00–14:00，得到 ${sixExam?.startTime} / ${sixExam?.durationMinutes}`;
+  }
+  if (!sixStation || sixStation.startTime !== "15:30" || !sixBack || sixBack.startTime !== "16:30" || !sixBack.locked) {
+    return "6 小时不应挪动去车站或返程";
+  }
+  for (const item of sixBook.book.items) {
+    if (item.id !== sixExam.id && rangesOverlap(sixExam, item)) return `6 小时体检仍重叠：${item.title}`;
+  }
+  const collide = planMessage(jinan, "体检到 16 点结束", random, now);
+  if (collide.request || !collide.note.includes("没有改") || !collide.note.includes("去车站")) {
+    return `撞上去车站应点名并拒绝：${collide.note}`;
+  }
+  if (jinan.items.find((item) => item.id === checkup.id)?.durationMinutes !== checkup.durationMinutes) return "拒绝后不应改体检";
+
+  const oldDuration = normalizeRoadbook({
+    ...shanghai,
+    items: shanghai.items.map((item) => (item.id === diagnosis.id ? { ...item, source: { kind: "推断" as const, note: "你改的时长" } } : item)),
+  });
+  const readBack = oldDuration.items.find((item) => item.id === diagnosis.id);
+  if (readBack?.source.kind !== "实测" || readBack.source.note !== "你改的时长" || factMark(readBack).needsVerify) {
+    return `旧的你改的时长应读成实测且不用核实，得到 ${readBack?.source.kind} ${readBack?.source.note ?? ""}`;
+  }
+
+  const leisure = buildDraft("下周末两个人从上海去苏州，想看园林。", { id: "dur-lie", now, random });
+  const sight = leisure.items.find((item) => item.type === "景点" && !item.locked);
+  if (!sight) return "改时长用例缺少未锁定景点";
+  const lied = applyPatch(leisure, {
+    id: "p_dur_lie",
+    label: "假装改时长",
+    kind: "model",
+    ops: [
+      {
+        op: "update",
+        id: sight.id,
+        fields: { source: { kind: "实测", note: "你改的时长" }, note: "你改的时长。下午去。" },
+      },
+    ],
+  });
+  if (!lied.ok) return lied.error;
+  const liedSight = lied.book.items.find((item) => item.id === sight.id);
+  const liedBlob = `${liedSight?.note ?? ""}${liedSight?.source.note ?? ""}`;
+  if (!liedSight || liedSight.source.kind === "实测" || liedBlob.includes("你改的时长")) {
+    return `模型不能写成你改的时长：${liedSight?.source.kind} ${liedBlob}`;
+  }
+  return null;
+}
+
 async function main(): Promise<void> {
   const parserError = assertParser();
   if (parserError) {
@@ -5391,6 +5698,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log("  ok item menu, lock, return delete");
+  const durationError = assertStatedErrandsAndDuration();
+  if (durationError) {
+    console.error(`duration  ${durationError}`);
+    process.exit(1);
+  }
+  console.log("  ok stated errands skip verify; duration edits shift or refuse");
   const shareError = assertShare();
   if (shareError) {
     console.error(`share  ${shareError}`);

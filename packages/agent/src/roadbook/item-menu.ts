@@ -1,8 +1,9 @@
 import { guideFor } from "../cities";
-import { planDeleteItem, planMoveItem } from "./message";
+import { userStatedErrand } from "./honesty";
+import { planDeleteItem, planDurationItem, planMoveItem } from "./message";
 import type { PatchRequest, Plan, Roadbook, RoadbookItem } from "./types";
 
-export type ItemMenuActionId = "swap" | "move" | "delete" | "why" | "lock" | "unlock";
+export type ItemMenuActionId = "swap" | "move" | "duration" | "delete" | "why" | "lock" | "unlock";
 
 export type ItemMenuAction = {
   id: ItemMenuActionId;
@@ -17,7 +18,7 @@ export type ItemMenu = {
   whyOnly: boolean;
   actions: ItemMenuAction[];
   why: string;
-  /** Unlocking a brief-stated lock (体检, 开会, 来自你的原话) needs a confirm. */
+  /** Unlocking a user-stated 办事, or anything marked 来自你的原话, needs a confirm. */
   unlockNeedsConfirm: boolean;
 };
 
@@ -28,7 +29,7 @@ function findItem(book: Roadbook, itemId: string): RoadbookItem | undefined {
 export function briefLock(item: RoadbookItem): boolean {
   const blob = `${item.note ?? ""} ${item.source.note ?? ""}`;
   if (blob.includes("来自你的原话")) return true;
-  return /体检|开会|会议/.test(item.title);
+  return userStatedErrand(item);
 }
 
 function whyClauses(text: string): string[] {
@@ -105,6 +106,7 @@ export function describeItemMenu(book: Roadbook, itemId: string, hasModelKey: bo
     actions: [
       ...actions,
       { id: "move", label: "挪时间", enabled: !locked, hint: locked ? "先解锁" : undefined },
+      { id: "duration", label: "改时长", enabled: !locked, hint: locked ? "先解锁" : undefined },
       { id: "delete", label: "删掉", enabled: !locked, hint: locked ? "先解锁" : undefined },
       { id: "why", label: "为什么安排这个", enabled: true },
       locked
@@ -170,6 +172,11 @@ export function chooseItemSwap(book: Roadbook, itemId: string, hasModelKey: bool
 
 export function planItemMove(book: Roadbook, itemId: string, startTime: string): Plan {
   return planMoveItem(book, itemId, startTime);
+}
+
+/** Menu duration. Locked items and 去车站 are refused; chat uses the same planner. */
+export function planItemDuration(book: Roadbook, itemId: string, change: number | string): Plan {
+  return planDurationItem(book, itemId, change);
 }
 
 export function planItemDelete(book: Roadbook, itemId: string): Plan {

@@ -6,6 +6,7 @@ export {
   cityTemplateNames,
   describeItemMenu,
   planItemDelete,
+  planItemDuration,
   planItemMove,
   chooseItemSwap,
   modelSwapText,
@@ -17,7 +18,7 @@ export {
 } from "./item-menu";
 export type { SwapChoice } from "./item-menu";
 export type { ItemMenu, ItemMenuAction, ItemMenuActionId } from "./item-menu";
-export { factMark, checklistRowRetired, isSearchStale, isWeatherStale, relabelConfirmedSource, verifyCue, weatherMark } from "./honesty";
+export { factMark, checklistRowRetired, isSearchStale, isWeatherStale, relabelConfirmedSource, sourceAfterUserClock, userStatedErrand, verifyCue, weatherMark } from "./honesty";
 export { SEARCH_STALE_MS, WEATHER_STALE_MS } from "./honesty";
 export type { FactMark, WeatherMark } from "./honesty";
 export { applyPatch, endsAfterDay, normalizeItem, normalizeRoadbook, normalizeRoadbookUndo, opsFromUnknown, projectPatch, readUndoStack, replaceWeather, setChecklistChecked, undoLast } from "./patch";
